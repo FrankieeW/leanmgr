@@ -121,6 +121,11 @@ leanmgr restore QuadraticNumberFields
 leanmgr restore --tag active
 ```
 
+## Tutorial
+
+A first-time walkthrough — install, add a project, dry-run cleanup, and
+restore — lives at [docs/tutorial.md](docs/tutorial.md).
+
 ## Cleanup Levels
 
 LeanMgr only deletes paths scoped under a selected project's `.lake` directory.
