@@ -1,6 +1,6 @@
 //! Output helpers for human-readable and JSON output.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Serialize;
 
 /// Print a serializable value as pretty JSON.
@@ -50,5 +50,50 @@ pub fn format_bytes(bytes: u64) -> String {
         format!("{bytes} {}", UNITS[unit])
     } else {
         format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// Parse a human byte size like `512`, `20GiB`, `2 GB` into a byte count.
+///
+/// Units are case-insensitive and treated as binary multipliers (`KB` == `KiB`).
+pub fn parse_bytes(input: &str) -> Result<u64> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("empty size: {input:?}");
+    }
+    let split = trimmed
+        .find(|c: char| c.is_ascii_alphabetic())
+        .unwrap_or(trimmed.len());
+    let (number, unit) = trimmed.split_at(split);
+    let value: f64 = number
+        .trim()
+        .parse()
+        .with_context(|| format!("invalid size number in {input:?}"))?;
+    if value < 0.0 {
+        anyhow::bail!("size must be non-negative: {input:?}");
+    }
+    let multiplier: f64 = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1.0,
+        "k" | "kb" | "kib" => 1024.0,
+        "m" | "mb" | "mib" => 1024.0 * 1024.0,
+        "g" | "gb" | "gib" => 1024.0_f64.powi(3),
+        "t" | "tb" | "tib" => 1024.0_f64.powi(4),
+        other => anyhow::bail!("unknown size unit {other:?} in {input:?}"),
+    };
+    Ok((value * multiplier) as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_bytes_handles_units() {
+        assert_eq!(parse_bytes("1024").unwrap(), 1024);
+        assert_eq!(parse_bytes("1KiB").unwrap(), 1024);
+        assert_eq!(parse_bytes("1 mib").unwrap(), 1024 * 1024);
+        assert_eq!(parse_bytes("2GB").unwrap(), 2 * 1024 * 1024 * 1024);
+        assert!(parse_bytes("abc").is_err());
+        assert!(parse_bytes("").is_err());
     }
 }
