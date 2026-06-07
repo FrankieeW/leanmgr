@@ -86,10 +86,7 @@ pub fn doctor_command(args: DoctorArgs) -> Result<()> {
 /// Build doctor diagnostics from projects.
 pub fn build_doctor_report(projects: &[Project], unused_days: u64) -> Result<DoctorReport> {
     let mut report = DoctorReport::default();
-    let cutoff = unused_days
-        .checked_mul(24 * 60 * 60)
-        .and_then(|seconds| SystemTime::now().checked_sub(Duration::from_secs(seconds)))
-        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let cutoff = unused_cutoff(unused_days);
 
     for project in projects {
         let root = project.expanded_path();
@@ -125,7 +122,15 @@ pub fn build_doctor_report(projects: &[Project], unused_days: u64) -> Result<Doc
     Ok(report)
 }
 
-fn is_unused(path: &std::path::Path, cutoff: SystemTime) -> Result<bool> {
+/// Cutoff time before which a `.lake` is considered unused.
+pub(crate) fn unused_cutoff(unused_days: u64) -> SystemTime {
+    unused_days
+        .checked_mul(24 * 60 * 60)
+        .and_then(|seconds| SystemTime::now().checked_sub(Duration::from_secs(seconds)))
+        .unwrap_or(SystemTime::UNIX_EPOCH)
+}
+
+pub(crate) fn is_unused(path: &std::path::Path, cutoff: SystemTime) -> Result<bool> {
     if !path.exists() {
         return Ok(false);
     }
@@ -140,5 +145,31 @@ fn read_toolchain(project: &Project) -> Option<String> {
         None
     } else {
         Some(value.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn tmp(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("leanmgr-{name}-{nonce}"))
+    }
+
+    #[test]
+    fn is_unused_compares_against_cutoff() {
+        let dir = tmp("is_unused");
+        fs::create_dir_all(&dir).unwrap();
+        let future = SystemTime::now() + Duration::from_secs(3600);
+        let past = SystemTime::now() - Duration::from_secs(3600);
+        assert!(is_unused(&dir, future).unwrap());
+        assert!(!is_unused(&dir, past).unwrap());
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -41,8 +41,16 @@ pub fn clean_command(args: CleanArgs) -> Result<()> {
         return Ok(());
     }
 
+    execute_targets(&targets, false)?;
+    Ok(())
+}
+
+/// Remove a planned set of targets, printing each removal unless `quiet` is
+/// set. Callers emitting machine-readable output (e.g. `--json`) should pass
+/// `quiet = true` so removal logs do not corrupt the output stream.
+pub fn execute_targets(targets: &[CleanTarget], quiet: bool) -> Result<()> {
     for target in targets {
-        remove_target(&target)?;
+        remove_target(target, quiet)?;
     }
     Ok(())
 }
@@ -111,7 +119,7 @@ fn print_clean_plan(targets: &[CleanTarget]) {
     print_table(&["PROJECT", "WOULD REMOVE", "SIZE"], &rows);
 }
 
-fn confirm_delete(total: u64) -> Result<bool> {
+pub(crate) fn confirm_delete(total: u64) -> Result<bool> {
     print!("Delete {}? [y/N] ", format_bytes(total));
     io::stdout().flush()?;
     let mut input = String::new();
@@ -119,7 +127,7 @@ fn confirm_delete(total: u64) -> Result<bool> {
     Ok(matches!(input.trim(), "y" | "Y" | "yes" | "YES"))
 }
 
-fn remove_target(target: &CleanTarget) -> Result<()> {
+fn remove_target(target: &CleanTarget, quiet: bool) -> Result<()> {
     if target.path.is_dir() {
         fs::remove_dir_all(&target.path)
             .with_context(|| format!("failed to remove {}", target.path.display()))?;
@@ -127,7 +135,9 @@ fn remove_target(target: &CleanTarget) -> Result<()> {
         fs::remove_file(&target.path)
             .with_context(|| format!("failed to remove {}", target.path.display()))?;
     }
-    println!("Removed {}", target.path.display());
+    if !quiet {
+        println!("Removed {}", target.path.display());
+    }
     Ok(())
 }
 
@@ -174,6 +184,7 @@ mod tests {
             description: None,
             added_at: None,
             last_seen_at: None,
+            last_committed_at: None,
             size_cache: None,
         };
 
@@ -183,6 +194,23 @@ mod tests {
         assert!(targets[0].bytes > 0);
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn execute_targets_removes_paths() {
+        let root = test_dir("execute_targets_removes_paths");
+        fs::create_dir_all(root.join(".lake/build")).unwrap();
+        fs::write(root.join(".lake/build/file"), b"data").unwrap();
+
+        let target = CleanTarget {
+            project: "demo".to_string(),
+            path: root.join(".lake"),
+            bytes: 4,
+        };
+        execute_targets(&[target], false).unwrap();
+        assert!(!root.join(".lake").exists());
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -202,6 +230,7 @@ mod tests {
             description: None,
             added_at: None,
             last_seen_at: None,
+            last_committed_at: None,
             size_cache: None,
         };
 
