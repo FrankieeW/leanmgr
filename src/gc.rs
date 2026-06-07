@@ -1,11 +1,13 @@
 //! Policy-driven, recoverability-checked cache cleanup.
 
-use crate::cli::CleanLevel;
-use crate::clean::{CleanTarget, build_clean_plan};
+use crate::clean::{CleanTarget, build_clean_plan, confirm_delete, execute_targets};
+use crate::cli::{CleanLevel, GcArgs};
+use crate::config::load_config;
 use crate::doctor::{is_unused, unused_cutoff};
+use crate::output::{format_bytes, parse_bytes, print_json, print_table};
 use crate::project::Project;
 use crate::recover::{Recoverability, assess};
-use anyhow::Result;
+use anyhow::{Result, bail};
 use serde::Serialize;
 use std::time::SystemTime;
 
@@ -99,6 +101,96 @@ pub fn plan_gc(projects: &[Project], opts: &GcOptions) -> Result<(Vec<CleanTarge
     Ok((targets, skipped))
 }
 
+#[derive(Serialize)]
+#[serde(untagged)]
+enum GcModeJson {
+    UnusedDays { unused_days: u64 },
+    Target { target_bytes: u64 },
+}
+
+#[derive(Serialize)]
+struct GcReport<'a> {
+    mode: GcModeJson,
+    targets: &'a [CleanTarget],
+    skipped: &'a [GcSkip],
+    total_bytes: u64,
+}
+
+/// Run the gc command: select by policy, report, confirm, and delete.
+pub fn gc_command(args: GcArgs) -> Result<()> {
+    let mode = match (args.unused_days, args.target.as_deref()) {
+        (Some(_), Some(_)) | (None, None) => {
+            bail!("select exactly one of --unused-days or --target")
+        }
+        (Some(days), None) => GcMode::UnusedDays(days),
+        (None, Some(value)) => GcMode::Target(parse_bytes(value)?),
+    };
+    let opts = GcOptions {
+        mode,
+        level: args.level,
+        include_unrecoverable: args.include_unrecoverable,
+    };
+
+    let config = load_config()?;
+    let scope: Vec<Project> = match args.tag.as_deref() {
+        Some(tag) => config
+            .projects
+            .into_iter()
+            .filter(|project| project.has_tag(tag))
+            .collect(),
+        None => config.projects,
+    };
+
+    let (targets, skipped) = plan_gc(&scope, &opts)?;
+    let total: u64 = targets.iter().map(|target| target.bytes).sum();
+
+    if args.json {
+        let mode = match opts.mode {
+            GcMode::UnusedDays(days) => GcModeJson::UnusedDays { unused_days: days },
+            GcMode::Target(bytes) => GcModeJson::Target {
+                target_bytes: bytes,
+            },
+        };
+        return print_json(&GcReport {
+            mode,
+            targets: &targets,
+            skipped: &skipped,
+            total_bytes: total,
+        });
+    }
+
+    let rows: Vec<Vec<String>> = targets
+        .iter()
+        .map(|target| {
+            vec![
+                target.project.clone(),
+                target.path.display().to_string(),
+                format_bytes(target.bytes),
+            ]
+        })
+        .collect();
+    print_table(&["PROJECT", "WOULD REMOVE", "SIZE"], &rows);
+
+    if !skipped.is_empty() {
+        println!("\nSkipped (unrecoverable, use --include-unrecoverable to force):");
+        for skip in &skipped {
+            println!("  {}  {}", skip.project, skip.reason);
+        }
+    }
+
+    println!("Total reclaimable: {}", format_bytes(total));
+
+    if args.dry_run || targets.is_empty() {
+        return Ok(());
+    }
+    if !args.force && !confirm_delete(total)? {
+        println!("Aborted.");
+        return Ok(());
+    }
+    execute_targets(&targets)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,7 +271,10 @@ mod tests {
             include_unrecoverable: false,
         };
         let (targets, skipped) = plan_gc(&[big, mid, small], &opts).unwrap();
-        let names: Vec<String> = targets.iter().map(|target| target.project.clone()).collect();
+        let names: Vec<String> = targets
+            .iter()
+            .map(|target| target.project.clone())
+            .collect();
         assert_eq!(targets.len(), 2);
         assert!(names.contains(&"big".to_string()));
         assert!(names.contains(&"mid".to_string()));
