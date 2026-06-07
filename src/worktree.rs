@@ -4,9 +4,12 @@ use crate::cli::{WorktreeArgs, WorktreePruneArgs};
 use crate::config::load_config;
 use crate::output::{print_json, print_table};
 use crate::process::run_in;
+use crate::project::Project;
 use anyhow::{Result, bail};
 use serde::Serialize;
 use std::io::{self, Write};
+use std::path::Path;
+use std::process::Output;
 
 /// Worktree row.
 #[derive(Clone, Debug, Serialize)]
@@ -63,22 +66,9 @@ pub fn prune_worktrees(args: WorktreePruneArgs) -> Result<()> {
     let config = load_config()?;
 
     if args.dry_run {
-        for project in &config.projects {
-            let Ok(output) = run_in(
-                &project.expanded_path(),
-                "git",
-                &["worktree", "prune", "--dry-run", "--verbose"],
-            ) else {
-                continue;
-            };
-            if !output.status.success() {
-                continue;
-            }
-            for line in String::from_utf8_lossy(&output.stdout).lines() {
-                println!("{}  {line}", project.name);
-            }
-        }
-        return Ok(());
+        let report = prune_projects(&config.projects, true, run_git_worktree_prune)?;
+        print_prune_report(&report);
+        return report.into_result();
     }
 
     if !args.force && !confirm_prune()? {
@@ -86,28 +76,73 @@ pub fn prune_worktrees(args: WorktreePruneArgs) -> Result<()> {
         return Ok(());
     }
 
-    let mut failures = Vec::new();
-    for project in &config.projects {
-        match run_in(&project.expanded_path(), "git", &["worktree", "prune"]) {
-            Ok(output) if output.status.success() => {}
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                failures.push((project.name.clone(), stderr));
-            }
-            Err(error) => failures.push((project.name.clone(), error.to_string())),
-        }
-    }
+    let report = prune_projects(&config.projects, false, run_git_worktree_prune)?;
+    print_prune_report(&report);
+    report.into_result()
+}
 
-    if !failures.is_empty() {
-        for (project, error) in &failures {
-            println!("Prune failed for {project}: {error}");
+#[derive(Debug, Default)]
+struct PruneReport {
+    dry_run_lines: Vec<(String, String)>,
+    failures: Vec<(String, String)>,
+}
+
+impl PruneReport {
+    fn into_result(self) -> Result<()> {
+        if self.failures.is_empty() {
+            return Ok(());
         }
         bail!(
             "git worktree prune failed for {} project(s)",
-            failures.len()
-        );
+            self.failures.len()
+        )
     }
-    Ok(())
+}
+
+fn prune_projects<F>(projects: &[Project], dry_run: bool, mut runner: F) -> Result<PruneReport>
+where
+    F: FnMut(&Path, bool) -> Result<Output>,
+{
+    let mut report = PruneReport::default();
+    for project in projects {
+        match runner(&project.expanded_path(), dry_run) {
+            Ok(output) if output.status.success() => {
+                if dry_run {
+                    for line in String::from_utf8_lossy(&output.stdout).lines() {
+                        report
+                            .dry_run_lines
+                            .push((project.name.clone(), line.to_string()));
+                    }
+                }
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                report.failures.push((project.name.clone(), stderr));
+            }
+            Err(error) => report
+                .failures
+                .push((project.name.clone(), error.to_string())),
+        }
+    }
+    Ok(report)
+}
+
+fn run_git_worktree_prune(path: &Path, dry_run: bool) -> Result<Output> {
+    let args = if dry_run {
+        &["worktree", "prune", "--dry-run", "--verbose"][..]
+    } else {
+        &["worktree", "prune"][..]
+    };
+    run_in(path, "git", args)
+}
+
+fn print_prune_report(report: &PruneReport) {
+    for (project, line) in &report.dry_run_lines {
+        println!("{project}  {line}");
+    }
+    for (project, error) in &report.failures {
+        println!("Prune failed for {project}: {error}");
+    }
 }
 
 fn collect_worktrees() -> Result<Vec<WorktreeInfo>> {
@@ -174,6 +209,7 @@ fn confirm_prune() -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::{ExitStatus, Output};
 
     #[test]
     fn parses_porcelain_worktrees() {
@@ -196,5 +232,61 @@ prunable gitdir file points to non-existent location
         assert_eq!(infos[1].path, "/repo-feature");
         assert_eq!(infos[1].branch.as_deref(), Some("feature"));
         assert!(infos[1].prunable);
+    }
+
+    #[test]
+    fn dry_run_prune_reports_failures() {
+        let projects = vec![project("ok"), project("bad")];
+        let report = prune_projects(&projects, true, |path, dry_run| {
+            assert!(dry_run);
+            if path.ends_with("bad") {
+                Ok(output(1, "", "not a git repository"))
+            } else {
+                Ok(output(0, "would prune /tmp/stale\n", ""))
+            }
+        })
+        .unwrap();
+
+        assert_eq!(
+            report.dry_run_lines,
+            vec![("ok".to_string(), "would prune /tmp/stale".to_string())]
+        );
+        assert_eq!(
+            report.failures,
+            vec![("bad".to_string(), "not a git repository".to_string())]
+        );
+        assert!(report.into_result().is_err());
+    }
+
+    fn project(name: &str) -> Project {
+        Project {
+            name: name.to_string(),
+            path: format!("/tmp/{name}"),
+            tags: Vec::new(),
+            description: None,
+            added_at: None,
+            last_seen_at: None,
+            size_cache: None,
+        }
+    }
+
+    fn output(code: i32, stdout: &str, stderr: &str) -> Output {
+        Output {
+            status: exit_status(code),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    #[cfg(unix)]
+    fn exit_status(code: i32) -> ExitStatus {
+        use std::os::unix::process::ExitStatusExt;
+        ExitStatus::from_raw(code << 8)
+    }
+
+    #[cfg(windows)]
+    fn exit_status(code: i32) -> ExitStatus {
+        use std::os::windows::process::ExitStatusExt;
+        ExitStatus::from_raw(code as u32)
     }
 }

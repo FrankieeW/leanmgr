@@ -174,6 +174,7 @@ mod tests {
             description: None,
             added_at: None,
             last_seen_at: None,
+            size_cache: None,
         };
 
         let targets = build_clean_plan(&[project], CleanLevel::Hard).unwrap();
@@ -201,6 +202,7 @@ mod tests {
             description: None,
             added_at: None,
             last_seen_at: None,
+            size_cache: None,
         };
 
         let targets = build_clean_plan(&[project], CleanLevel::DepsBuild).unwrap();

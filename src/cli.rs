@@ -183,6 +183,9 @@ pub struct ListArgs {
     /// Filter by tag.
     #[arg(long)]
     pub tag: Option<String>,
+    /// Recompute `.lake` sizes and update the size cache.
+    #[arg(long)]
+    pub sizes: bool,
     /// Emit JSON.
     #[arg(long)]
     pub json: bool,

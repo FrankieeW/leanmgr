@@ -4,7 +4,7 @@ use crate::cli::{AddArgs, ListArgs, RemoveArgs};
 use crate::config::{load_config, save_config};
 use crate::output::{print_json, print_table};
 use crate::paths::{display_path, expand_tilde, normalize_existing_or_join, now_string};
-use crate::size::project_size;
+use crate::size::{ProjectSize, project_size};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -28,6 +28,37 @@ pub struct Project {
     /// Timestamp string when the project was last seen.
     #[serde(default)]
     pub last_seen_at: Option<String>,
+    /// Cached `.lake` size information for fast list output.
+    #[serde(default)]
+    pub size_cache: Option<SizeCache>,
+}
+
+/// Cached `.lake` size information.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SizeCache {
+    /// Bytes under `.lake`.
+    pub lake: u64,
+    /// Bytes under `.lake/build`.
+    pub build: u64,
+    /// Bytes under `.lake/packages`.
+    pub packages: u64,
+    /// Total bytes counted for the project.
+    pub total: u64,
+    /// Timestamp string when this entry was computed.
+    pub computed_at: String,
+}
+
+impl SizeCache {
+    /// Build a cache entry from a fresh size calculation.
+    pub fn from_project_size(size: &ProjectSize) -> Self {
+        Self {
+            lake: size.lake,
+            build: size.build,
+            packages: size.packages,
+            total: size.total,
+            computed_at: now_string(),
+        }
+    }
 }
 
 impl Project {
@@ -78,6 +109,7 @@ pub fn add_project(args: AddArgs) -> Result<()> {
         description: args.description,
         added_at: Some(now.clone()),
         last_seen_at: Some(now),
+        size_cache: None,
     });
     save_config(&config)?;
     println!("Added {name}");
@@ -101,7 +133,12 @@ pub fn remove_project(args: RemoveArgs) -> Result<()> {
 
 /// List configured projects.
 pub fn list_projects(args: ListArgs) -> Result<()> {
-    let config = load_config()?;
+    let mut config = load_config()?;
+    if args.sizes {
+        refresh_size_cache(&mut config.projects, args.tag.as_deref())?;
+        save_config(&config)?;
+    }
+
     let projects = filter_by_tag(&config.projects, args.tag.as_deref());
     if args.json {
         return print_json(&projects);
@@ -109,16 +146,41 @@ pub fn list_projects(args: ListArgs) -> Result<()> {
 
     let mut rows = Vec::new();
     for project in projects {
-        let size = project_size(project)?;
+        let (size, computed_at) = cached_size_cells(project);
         rows.push(vec![
             project.name.clone(),
             project.path.clone(),
-            crate::output::format_bytes(size.total),
             project.tags.join(","),
+            size,
+            computed_at,
         ]);
     }
-    print_table(&["NAME", "PATH", "SIZE", "TAGS"], &rows);
+    print_table(&["NAME", "PATH", "TAGS", "SIZE", "SIZE_AT"], &rows);
     Ok(())
+}
+
+fn refresh_size_cache(projects: &mut [Project], tag: Option<&str>) -> Result<()> {
+    for project in projects {
+        if tag.is_some_and(|tag| !project.has_tag(tag)) {
+            continue;
+        }
+        let size = project_size(project)?;
+        project.size_cache = Some(SizeCache::from_project_size(&size));
+    }
+    Ok(())
+}
+
+fn cached_size_cells(project: &Project) -> (String, String) {
+    project
+        .size_cache
+        .as_ref()
+        .map(|cache| {
+            (
+                crate::output::format_bytes(cache.total),
+                cache.computed_at.clone(),
+            )
+        })
+        .unwrap_or_else(|| ("unknown".to_string(), "never".to_string()))
 }
 
 /// Return projects matching a selector.
@@ -177,4 +239,45 @@ pub fn filter_by_tag<'a>(projects: &'a [Project], tag: Option<&str>) -> Vec<&'a 
         .iter()
         .filter(|project| tag.is_none_or(|tag| project.has_tag(tag)))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_size_cells_show_unknown_without_cache() {
+        let project = project_with_cache(None);
+        assert_eq!(
+            cached_size_cells(&project),
+            ("unknown".to_string(), "never".to_string())
+        );
+    }
+
+    #[test]
+    fn cached_size_cells_use_cached_values() {
+        let project = project_with_cache(Some(SizeCache {
+            lake: 2048,
+            build: 1024,
+            packages: 512,
+            total: 2048,
+            computed_at: "123".to_string(),
+        }));
+        assert_eq!(
+            cached_size_cells(&project),
+            ("2.0 KiB".to_string(), "123".to_string())
+        );
+    }
+
+    fn project_with_cache(size_cache: Option<SizeCache>) -> Project {
+        Project {
+            name: "demo".to_string(),
+            path: "/tmp/demo".to_string(),
+            tags: Vec::new(),
+            description: None,
+            added_at: None,
+            last_seen_at: None,
+            size_cache,
+        }
+    }
 }
