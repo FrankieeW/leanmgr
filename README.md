@@ -134,6 +134,22 @@ LeanMgr only deletes paths scoped under a selected project's `.lake` directory.
 All destructive commands support `--dry-run`. Without `--force`, LeanMgr asks
 for confirmation before deleting.
 
+## Garbage Collection
+
+`leanmgr gc` reclaims space across the whole fleet in one command. Select by
+age or by a size budget, and gc deletes only caches it judges *recoverable*
+(a project with `lake-manifest.json` and a non-empty `lean-toolchain`):
+
+```sh
+leanmgr gc --unused-days 90 --dry-run        # clean everything stale
+leanmgr gc --target 20GiB --dry-run          # free at least 20 GiB, largest first
+leanmgr gc --unused-days 90                  # confirm, then delete
+```
+
+Unrecoverable caches are skipped and listed. Use `--include-unrecoverable` to
+delete them anyway. `gc` defaults to `--level hard` and, like `clean`, supports
+`--dry-run`, `--force`, and `--json`.
+
 ## Size Cache
 
 `leanmgr list` is intentionally fast. It reads cached size values from
@@ -164,6 +180,8 @@ leanmgr gitignore [<name>] [--tag <tag>] [--all] [--dry-run]
 leanmgr clean <name> --level <soft|deps-build|hard> [--dry-run] [--force]
 leanmgr clean --tag <tag> --level <soft|deps-build|hard> [--dry-run] [--force]
 leanmgr clean --all --level <soft|deps-build|hard> [--dry-run] [--force]
+leanmgr gc --unused-days <N> [--tag <tag>] [--level <soft|deps-build|hard>] [--include-unrecoverable] [--dry-run] [--force] [--json]
+leanmgr gc --target <SIZE> [--tag <tag>] [--level <soft|deps-build|hard>] [--include-unrecoverable] [--dry-run] [--force] [--json]
 leanmgr restore <name> [--all] [--tag <tag>]
 leanmgr tag add <project> <tag>
 leanmgr tag remove <project> <tag>
