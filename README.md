@@ -33,24 +33,34 @@ into a dry-run-first project management workflow.
 
 ## Install
 
-Homebrew:
+One-line install or update (macOS, Linux, Windows via Git Bash/WSL). Prefers
+Homebrew when available and falls back to a source build otherwise:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/FrankieeW/leanmgr/main/scripts/install.sh | bash
+```
+
+Homebrew directly:
 
 ```sh
 brew install frankieew/tap/leanmgr
 ```
 
-From this repository:
+From a local checkout, the same script builds from source and installs to
+`~/.local/bin` (override with `INSTALL_DIR`):
 
 ```sh
-cargo build --release
 scripts/install.sh
-```
-
-By default, the script installs to `~/.local/bin`. Override with:
-
-```sh
 INSTALL_DIR=/usr/local/bin scripts/install.sh
 ```
+
+Script behavior is controlled by environment variables:
+
+| Variable | Effect |
+| --- | --- |
+| `LEANMGR_NO_BREW=1` | Skip Homebrew even if installed. |
+| `LEANMGR_VERSION` | Git tag for the cargo fallback (default `v0.1.0`). |
+| `INSTALL_DIR` | Target dir for the local-build path (default `~/.local/bin`). |
 
 ## Configuration
 
