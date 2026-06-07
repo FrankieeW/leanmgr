@@ -159,7 +159,7 @@ pub fn gc_command(args: GcArgs) -> Result<()> {
 
     if args.json {
         if will_execute {
-            execute_targets(&targets)?;
+            execute_targets(&targets, true)?;
         }
         let mode = match opts.mode {
             GcMode::UnusedDays(days) => GcModeJson::UnusedDays { unused_days: days },
@@ -203,7 +203,7 @@ pub fn gc_command(args: GcArgs) -> Result<()> {
         }
         return Ok(());
     }
-    execute_targets(&targets)?;
+    execute_targets(&targets, false)?;
     Ok(())
 }
 
