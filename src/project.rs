@@ -28,6 +28,9 @@ pub struct Project {
     /// Timestamp string when the project was last seen.
     #[serde(default)]
     pub last_seen_at: Option<String>,
+    /// Timestamp string of the project's most recent commit, if known.
+    #[serde(default)]
+    pub last_committed_at: Option<String>,
     /// Cached `.lake` size information for fast list output.
     #[serde(default)]
     pub size_cache: Option<SizeCache>,
@@ -108,7 +111,8 @@ pub fn add_project(args: AddArgs) -> Result<()> {
         tags,
         description: args.description,
         added_at: Some(now.clone()),
-        last_seen_at: Some(now),
+        last_seen_at: Some(now.clone()),
+        last_committed_at: Some(now),
         size_cache: None,
     });
     save_config(&config)?;
@@ -277,6 +281,7 @@ mod tests {
             description: None,
             added_at: None,
             last_seen_at: None,
+            last_committed_at: None,
             size_cache,
         }
     }

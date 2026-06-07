@@ -85,6 +85,7 @@ fn add_discovered(discovered: Vec<DiscoveredProject>) -> Result<()> {
             description: None,
             added_at: Some(now.clone()),
             last_seen_at: Some(now.clone()),
+            last_committed_at: Some(now.clone()),
             size_cache: None,
         });
         added += 1;
@@ -168,6 +169,7 @@ mod tests {
             description: None,
             added_at: None,
             last_seen_at: None,
+            last_committed_at: None,
             size_cache: None,
         }
     }
