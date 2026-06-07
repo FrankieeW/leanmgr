@@ -138,7 +138,8 @@ for confirmation before deleting.
 
 `leanmgr gc` reclaims space across the whole fleet in one command. Select by
 age or by a size budget, and gc deletes only caches it judges *recoverable*
-(a project with `lake-manifest.json` and a non-empty `lean-toolchain`):
+(a project with `lake-manifest.json`, a Lake file — `lakefile.toml` or
+`lakefile.lean` — and a non-empty `lean-toolchain`):
 
 ```sh
 leanmgr gc --unused-days 90 --dry-run        # clean everything stale
