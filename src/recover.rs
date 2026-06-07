@@ -14,12 +14,16 @@ pub enum Recoverability {
 
 /// Assess recoverability using only local files. No network, no process spawn.
 ///
-/// Recoverable iff `lake-manifest.json` exists and `lean-toolchain` is present
-/// and non-empty.
+/// Recoverable iff `lake-manifest.json` exists, a Lake file
+/// (`lakefile.toml` or `lakefile.lean`) is present, and `lean-toolchain`
+/// exists and is non-empty.
 pub fn assess(project: &Project) -> Recoverability {
     let root = project.expanded_path();
     if !root.join("lake-manifest.json").exists() {
         return Recoverability::Unrecoverable("no lake-manifest.json".to_string());
+    }
+    if !root.join("lakefile.toml").exists() && !root.join("lakefile.lean").exists() {
+        return Recoverability::Unrecoverable("no lakefile.toml or lakefile.lean".to_string());
     }
     match fs::read_to_string(root.join("lean-toolchain")) {
         Ok(content) if !content.trim().is_empty() => Recoverability::Recoverable,
@@ -58,9 +62,23 @@ mod tests {
     fn recoverable_with_manifest_and_toolchain() {
         let root = tmp("recover_ok");
         fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("lakefile.toml"), b"").unwrap();
         fs::write(root.join("lake-manifest.json"), b"{}").unwrap();
         fs::write(root.join("lean-toolchain"), b"leanprover/lean4:v4.0.0\n").unwrap();
         assert_eq!(assess(&project_at(&root)), Recoverability::Recoverable);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn unrecoverable_without_lakefile() {
+        let root = tmp("recover_no_lakefile");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("lake-manifest.json"), b"{}").unwrap();
+        fs::write(root.join("lean-toolchain"), b"leanprover/lean4:v4.0.0\n").unwrap();
+        assert_eq!(
+            assess(&project_at(&root)),
+            Recoverability::Unrecoverable("no lakefile.toml or lakefile.lean".to_string())
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -80,6 +98,7 @@ mod tests {
     fn unrecoverable_with_empty_toolchain() {
         let root = tmp("recover_empty_toolchain");
         fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("lakefile.toml"), b"").unwrap();
         fs::write(root.join("lake-manifest.json"), b"{}").unwrap();
         fs::write(root.join("lean-toolchain"), b"   \n").unwrap();
         assert_eq!(
