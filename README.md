@@ -91,6 +91,7 @@ Inspect:
 
 ```sh
 leanmgr list
+leanmgr list --sizes
 leanmgr size --all
 leanmgr doctor
 leanmgr ai context --format codex
@@ -133,13 +134,29 @@ LeanMgr only deletes paths scoped under a selected project's `.lake` directory.
 All destructive commands support `--dry-run`. Without `--force`, LeanMgr asks
 for confirmation before deleting.
 
+## Size Cache
+
+`leanmgr list` is intentionally fast. It reads cached size values from
+`config.json` and shows `unknown` / `never` when a project has not been measured
+yet.
+
+Refresh cached sizes explicitly:
+
+```sh
+leanmgr list --sizes
+leanmgr list --tag active --sizes
+```
+
+Use `leanmgr size` when you want a dedicated real-time size scan instead of a
+quick project index view.
+
 ## Commands
 
 ```text
 leanmgr init
 leanmgr add <path> [--name <name>] [--tag <tag>]...
 leanmgr remove <name-or-path>
-leanmgr list [--tag <tag>] [--json]
+leanmgr list [--tag <tag>] [--sizes] [--json]
 leanmgr scan <root> [--yes] [--json]
 leanmgr size [<name>] [--tag <tag>] [--all] [--json]
 leanmgr doctor [--unused-days 90] [--json]
