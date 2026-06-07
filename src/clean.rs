@@ -41,8 +41,14 @@ pub fn clean_command(args: CleanArgs) -> Result<()> {
         return Ok(());
     }
 
+    execute_targets(&targets)?;
+    Ok(())
+}
+
+/// Remove a planned set of targets, printing each removal.
+pub fn execute_targets(targets: &[CleanTarget]) -> Result<()> {
     for target in targets {
-        remove_target(&target)?;
+        remove_target(target)?;
     }
     Ok(())
 }
@@ -111,7 +117,7 @@ fn print_clean_plan(targets: &[CleanTarget]) {
     print_table(&["PROJECT", "WOULD REMOVE", "SIZE"], &rows);
 }
 
-fn confirm_delete(total: u64) -> Result<bool> {
+pub(crate) fn confirm_delete(total: u64) -> Result<bool> {
     print!("Delete {}? [y/N] ", format_bytes(total));
     io::stdout().flush()?;
     let mut input = String::new();
@@ -183,6 +189,23 @@ mod tests {
         assert!(targets[0].bytes > 0);
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn execute_targets_removes_paths() {
+        let root = test_dir("execute_targets_removes_paths");
+        fs::create_dir_all(root.join(".lake/build")).unwrap();
+        fs::write(root.join(".lake/build/file"), b"data").unwrap();
+
+        let target = CleanTarget {
+            project: "demo".to_string(),
+            path: root.join(".lake"),
+            bytes: 4,
+        };
+        execute_targets(&[target]).unwrap();
+        assert!(!root.join(".lake").exists());
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
