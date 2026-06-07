@@ -114,6 +114,7 @@ struct GcReport<'a> {
     targets: &'a [CleanTarget],
     skipped: &'a [GcSkip],
     total_bytes: u64,
+    executed: bool,
 }
 
 /// Run the gc command: select by policy, report, confirm, and delete.
@@ -144,7 +145,22 @@ pub fn gc_command(args: GcArgs) -> Result<()> {
     let (targets, skipped) = plan_gc(&scope, &opts)?;
     let total: u64 = targets.iter().map(|target| target.bytes).sum();
 
+    // Decide whether to delete. JSON mode never prompts (scripts can't answer
+    // interactively); --force is the only way to execute from JSON.
+    let will_execute = if args.dry_run || targets.is_empty() {
+        false
+    } else if args.force {
+        true
+    } else if args.json {
+        false
+    } else {
+        confirm_delete(total)?
+    };
+
     if args.json {
+        if will_execute {
+            execute_targets(&targets)?;
+        }
         let mode = match opts.mode {
             GcMode::UnusedDays(days) => GcModeJson::UnusedDays { unused_days: days },
             GcMode::Target(bytes) => GcModeJson::Target {
@@ -156,6 +172,7 @@ pub fn gc_command(args: GcArgs) -> Result<()> {
             targets: &targets,
             skipped: &skipped,
             total_bytes: total,
+            executed: will_execute,
         });
     }
 
@@ -180,11 +197,10 @@ pub fn gc_command(args: GcArgs) -> Result<()> {
 
     println!("Total reclaimable: {}", format_bytes(total));
 
-    if args.dry_run || targets.is_empty() {
-        return Ok(());
-    }
-    if !args.force && !confirm_delete(total)? {
-        println!("Aborted.");
+    if !will_execute {
+        if !args.dry_run && !targets.is_empty() {
+            println!("Aborted.");
+        }
         return Ok(());
     }
     execute_targets(&targets)?;
@@ -211,6 +227,7 @@ mod tests {
         fs::create_dir_all(proj.join(".lake")).unwrap();
         fs::write(proj.join(".lake/blob"), vec![b'x'; lake_bytes]).unwrap();
         if recoverable {
+            fs::write(proj.join("lakefile.toml"), b"").unwrap();
             fs::write(proj.join("lake-manifest.json"), b"{}").unwrap();
             fs::write(proj.join("lean-toolchain"), b"leanprover/lean4:v4.0.0\n").unwrap();
         }
