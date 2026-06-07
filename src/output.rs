@@ -65,10 +65,20 @@ pub fn parse_bytes(input: &str) -> Result<u64> {
         .find(|c: char| c.is_ascii_alphabetic())
         .unwrap_or(trimmed.len());
     let (number, unit) = trimmed.split_at(split);
-    let value: f64 = number
-        .trim()
-        .parse()
-        .with_context(|| format!("invalid size number in {input:?}"))?;
+    let number = number.trim();
+    // Pure integers (no `.`, `e`, `E`) parse strictly as u64 so overflow is
+    // caught. Decimals fall back to f64, which is exact for small values and
+    // checked against u64::MAX below.
+    let value: f64 = if number.contains('.') || number.contains('e') || number.contains('E') {
+        number
+            .parse()
+            .with_context(|| format!("invalid size number in {input:?}"))?
+    } else {
+        let int: u64 = number
+            .parse()
+            .with_context(|| format!("invalid size number in {input:?}"))?;
+        int as f64
+    };
     if value < 0.0 {
         anyhow::bail!("size must be non-negative: {input:?}");
     }
@@ -80,7 +90,14 @@ pub fn parse_bytes(input: &str) -> Result<u64> {
         "t" | "tb" | "tib" => 1024.0_f64.powi(4),
         other => anyhow::bail!("unknown size unit {other:?} in {input:?}"),
     };
-    Ok((value * multiplier) as u64)
+    let product = value * multiplier;
+    if !product.is_finite() {
+        anyhow::bail!("size is not finite: {input:?}");
+    }
+    if product > u64::MAX as f64 {
+        anyhow::bail!("size exceeds u64::MAX: {input:?}");
+    }
+    Ok(product as u64)
 }
 
 #[cfg(test)]
@@ -95,5 +112,15 @@ mod tests {
         assert_eq!(parse_bytes("2GB").unwrap(), 2 * 1024 * 1024 * 1024);
         assert!(parse_bytes("abc").is_err());
         assert!(parse_bytes("").is_err());
+    }
+
+    #[test]
+    fn parse_bytes_rejects_overflow() {
+        // 2^64 bytes — float parsing rounds up to a value that would saturate
+        // to u64::MAX on the final cast. Must error, not silently saturate.
+        assert!(parse_bytes("18446744073709551616").is_err());
+        assert!(parse_bytes("1e20").is_err());
+        assert!(parse_bytes("1e20B").is_err());
+        assert!(parse_bytes("1e15TiB").is_err());
     }
 }
