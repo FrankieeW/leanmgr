@@ -6,3 +6,4 @@
 .omx/*.json
 !.omx/plans/
 !.omx/plans/*.md
+docs/superpowers/
