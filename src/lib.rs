@@ -11,6 +11,7 @@ pub mod output;
 pub mod paths;
 pub mod process;
 pub mod project;
+pub mod recover;
 pub mod restore;
 pub mod size;
 pub mod tags;
