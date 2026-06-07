@@ -134,8 +134,30 @@ pub(crate) fn is_unused(path: &std::path::Path, cutoff: SystemTime) -> Result<bo
     if !path.exists() {
         return Ok(false);
     }
-    let modified = fs::metadata(path)?.modified().unwrap_or(SystemTime::now());
-    Ok(modified < cutoff)
+    // A directory's own mtime only updates when entries are added or removed,
+    // not when existing files are rewritten. Incremental `lake build` modifies
+    // files under `.lake/build/` without touching the dir mtime, which made
+    // actively-used projects look stale. Walk the tree and use the maximum
+    // mtime so any recent file activity is detected.
+    let mut latest = SystemTime::UNIX_EPOCH;
+    for entry in walkdir::WalkDir::new(path).follow_links(false) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let mtime = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        if mtime > latest {
+            latest = mtime;
+            if latest >= cutoff {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(latest < cutoff)
 }
 
 fn read_toolchain(project: &Project) -> Option<String> {
@@ -170,6 +192,39 @@ mod tests {
         let past = SystemTime::now() - Duration::from_secs(3600);
         assert!(is_unused(&dir, future).unwrap());
         assert!(!is_unused(&dir, past).unwrap());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn is_unused_walks_recursively_for_recent_writes() {
+        // Create the dir, then a moment later create a file inside. The file's
+        // mtime is at least as fresh as the dir's; the recursive walk must
+        // observe it. Without recursion, the dir's mtime alone could be older
+        // than a cutoff that the file's mtime exceeds, which is exactly the
+        // case that broke incremental `lake build` detection in the field.
+        let dir = tmp("is_unused_recursive");
+        fs::create_dir_all(&dir).unwrap();
+        let dir_mtime = fs::metadata(&dir).unwrap().modified().unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+        fs::create_dir_all(dir.join("build")).unwrap();
+        fs::write(dir.join("build/fresh.olean"), b"data").unwrap();
+        let file_mtime = fs::metadata(dir.join("build/fresh.olean"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert!(
+            file_mtime > dir_mtime,
+            "test setup: file mtime must exceed dir mtime"
+        );
+
+        // Cutoff set to dir_mtime must NOT consider the dir unused; the file
+        // is fresher than that.
+        assert!(
+            !is_unused(&dir, dir_mtime).unwrap(),
+            "a fresh file under .lake must keep the project in use even when \
+             the dir mtime alone is at the cutoff"
+        );
+
         fs::remove_dir_all(&dir).unwrap();
     }
 }

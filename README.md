@@ -94,6 +94,7 @@ leanmgr list
 leanmgr list --sizes
 leanmgr size --all
 leanmgr doctor
+leanmgr interact
 leanmgr ai context --format codex
 leanmgr toolchain check
 leanmgr worktree list
@@ -151,6 +152,27 @@ Unrecoverable caches are skipped and listed. Use `--include-unrecoverable` to
 delete them anyway. `gc` defaults to `--level hard` and, like `clean`, supports
 `--dry-run`, `--force`, and `--json`.
 
+## Interactive Assistant
+
+Use `leanmgr interact` when you want a guided terminal workflow instead of
+remembering individual commands:
+
+```sh
+leanmgr interact
+leanmgr interact --tag active
+leanmgr interact --unused-days 30
+```
+
+The assistant displays a fleet dashboard with project counts, cached size
+coverage, reclaimable space, stale projects, missing paths, missing Lake files,
+toolchains, tags, and the largest cache. Its action menu can list projects,
+show doctor details, plan a stale-cache gc dry-run, plan a one-project clean
+dry-run, or build a restore command.
+
+The interactive assistant is intentionally review-first. It does not delete
+cache directories itself; destructive cleanup remains in `leanmgr clean` and
+`leanmgr gc`, where the existing dry-run and confirmation safeguards apply.
+
 ## Size Cache
 
 `leanmgr list` is intentionally fast. It reads cached size values from
@@ -177,6 +199,7 @@ leanmgr list [--tag <tag>] [--sizes] [--json]
 leanmgr scan <root> [--yes] [--json]
 leanmgr size [<name>] [--tag <tag>] [--all] [--json]
 leanmgr doctor [--unused-days 90] [--json]
+leanmgr interact [--unused-days 90] [--tag <tag>]
 leanmgr gitignore [<name>] [--tag <tag>] [--all] [--dry-run]
 leanmgr clean <name> --level <soft|deps-build|hard> [--dry-run] [--force]
 leanmgr clean --tag <tag> --level <soft|deps-build|hard> [--dry-run] [--force]

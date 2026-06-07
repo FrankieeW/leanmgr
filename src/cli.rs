@@ -34,6 +34,8 @@ pub enum Commands {
     Size(SizeArgs),
     /// Diagnose cache, toolchain, and project health.
     Doctor(DoctorArgs),
+    /// Start an interactive cache-management assistant.
+    Interact(InteractArgs),
     /// Ensure selected projects ignore `.lake/`.
     Gitignore(GitignoreArgs),
     /// Remove `.lake`-scoped cache paths.
@@ -231,6 +233,17 @@ pub struct DoctorArgs {
     /// Emit JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+/// Arguments for `leanmgr interact`.
+#[derive(Debug, Args)]
+pub struct InteractArgs {
+    /// Consider projects unused after this many days since `.lake` modification.
+    #[arg(long, default_value_t = 90)]
+    pub unused_days: u64,
+    /// Filter the assistant scope by tag.
+    #[arg(long)]
+    pub tag: Option<String>,
 }
 
 /// Arguments for `leanmgr gitignore`.

@@ -37,6 +37,13 @@ pub fn print_table(headers: &[&str], rows: &[Vec<String>]) {
     }
 }
 
+/// Print a human-readable section heading.
+pub fn print_section(title: &str) {
+    println!();
+    println!("{title}");
+    println!("{}", "-".repeat(title.len()));
+}
+
 /// Format byte counts with binary units.
 pub fn format_bytes(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB"];

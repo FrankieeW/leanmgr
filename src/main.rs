@@ -14,6 +14,7 @@ fn main() -> Result<()> {
         Commands::Scan(args) => leanmgr::discovery::scan_command(args),
         Commands::Size(args) => leanmgr::size::size_command(args),
         Commands::Doctor(args) => leanmgr::doctor::doctor_command(args),
+        Commands::Interact(args) => leanmgr::interactive::interact_command(args),
         Commands::Gitignore(args) => leanmgr::gitignore::gitignore_command(args),
         Commands::Clean(args) => leanmgr::clean::clean_command(args),
         Commands::Gc(args) => leanmgr::gc::gc_command(args),

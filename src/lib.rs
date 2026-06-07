@@ -8,6 +8,7 @@ pub mod discovery;
 pub mod doctor;
 pub mod gc;
 pub mod gitignore;
+pub mod interactive;
 pub mod output;
 pub mod paths;
 pub mod process;
