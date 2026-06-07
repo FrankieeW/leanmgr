@@ -8,7 +8,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 pub struct Cli {
     /// Command to run.
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 /// Top-level command set.

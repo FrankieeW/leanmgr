@@ -54,9 +54,10 @@ install_via_brew() {
 
 install_via_local_build() {
   local repo_root="$1"
-  local suffix binary
+  local suffix binary short_binary
   suffix="$(exe_suffix)"
   binary="$repo_root/target/release/leanmgr$suffix"
+  short_binary="$repo_root/target/release/lm$suffix"
 
   have cargo || die "cargo not found. Install Rust from https://rustup.rs or use Homebrew."
   log "Building from local checkout (cargo build --release)..."
@@ -64,7 +65,13 @@ install_via_local_build() {
 
   mkdir -p "$INSTALL_DIR"
   cp "$binary" "$INSTALL_DIR/leanmgr$suffix"
+  if [ -f "$short_binary" ]; then
+    cp "$short_binary" "$INSTALL_DIR/lm$suffix"
+  else
+    cp "$binary" "$INSTALL_DIR/lm$suffix"
+  fi
   log "Installed leanmgr to $INSTALL_DIR/leanmgr$suffix"
+  log "Installed lm to $INSTALL_DIR/lm$suffix"
   warn "Ensure $INSTALL_DIR is on your PATH."
 }
 
@@ -97,6 +104,7 @@ main() {
 
   if have leanmgr; then
     log "Done: $(leanmgr --version)"
+    have lm && log "Short command ready: lm"
   else
     warn "leanmgr is installed but not yet on PATH. Open a new shell or update PATH."
   fi

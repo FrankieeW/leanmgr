@@ -8,8 +8,14 @@ use crate::gc::{GcMode, GcOptions, plan_gc};
 use crate::output::format_bytes;
 use crate::project::{Project, filter_by_tag};
 use anyhow::{Context, Result, bail};
+use crossterm::cursor::{MoveToColumn, MoveUp};
+use crossterm::event::{self, Event, KeyCode};
+use crossterm::execute;
+use crossterm::queue;
+use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
+use crossterm::terminal::{self, Clear, ClearType, disable_raw_mode, enable_raw_mode};
 use std::collections::BTreeMap;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 
 /// High-level fleet summary for interactive display.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -31,6 +37,9 @@ pub fn interact_command(args: InteractArgs) -> Result<()> {
         .into_iter()
         .cloned()
         .collect();
+    if io::stdin().is_terminal() && io::stdout().is_terminal() {
+        return run_keyboard_session(&projects, args.unused_days);
+    }
     let input = io::stdin();
     let mut output = io::stdout();
     run_session(&projects, args.unused_days, input.lock(), &mut output)
@@ -99,6 +108,267 @@ pub fn summarize_fleet(projects: &[Project]) -> FleetSummary {
         measured_count,
         cached_total,
         tags,
+    }
+}
+
+fn run_keyboard_session(projects: &[Project], unused_days: u64) -> Result<()> {
+    if projects.is_empty() {
+        println!("No indexed projects in this scope.");
+        println!("Add projects with `leanmgr add <path>` or `leanmgr scan <root>`.");
+        return Ok(());
+    }
+
+    let mut output = io::stdout();
+    let mut selected = 0usize;
+    let mut first_render = true;
+
+    loop {
+        let doctor = build_doctor_report(projects, unused_days)?;
+        render_keyboard_menu(
+            projects,
+            &doctor,
+            unused_days,
+            selected,
+            first_render,
+            &mut output,
+        )?;
+        first_render = false;
+
+        enable_raw_mode()?;
+        let action = read_menu_action(&mut selected)?;
+        disable_raw_mode()?;
+
+        match action {
+            MenuAction::Open(index) => {
+                println!();
+                run_menu_action(index, projects, &doctor, unused_days)?;
+                println!();
+                println!("Press any key to return to the menu, or q to quit.");
+                enable_raw_mode()?;
+                let quit = matches!(read_key_code()?, KeyCode::Char('q') | KeyCode::Esc);
+                disable_raw_mode()?;
+                if quit {
+                    println!("Done.");
+                    break;
+                }
+                first_render = true;
+            }
+            MenuAction::Refresh => {
+                first_render = true;
+            }
+            MenuAction::Quit => {
+                println!();
+                println!("Done.");
+                break;
+            }
+            MenuAction::Redraw => {}
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MenuAction {
+    Open(usize),
+    Refresh,
+    Quit,
+    Redraw,
+}
+
+const KEYBOARD_ACTIONS: &[(&str, &str)] = &[
+    ("List projects", "Browse indexed projects and cached sizes"),
+    (
+        "Doctor details",
+        "Review missing paths, Lake files, and toolchains",
+    ),
+    ("GC dry-run", "Preview stale recoverable cache cleanup"),
+    ("Clean dry-run", "Plan cleanup for one project"),
+    ("Restore command", "Build a restore command for one project"),
+];
+const KEYBOARD_MENU_LINES: u16 = 13;
+
+fn render_keyboard_menu<W: Write>(
+    projects: &[Project],
+    doctor: &DoctorReport,
+    unused_days: u64,
+    selected: usize,
+    first_render: bool,
+    output: &mut W,
+) -> Result<()> {
+    if !first_render {
+        execute!(
+            output,
+            MoveUp(KEYBOARD_MENU_LINES),
+            MoveToColumn(0),
+            Clear(ClearType::FromCursorDown)
+        )?;
+    }
+    let width = terminal::size()
+        .map(|(width, _)| width as usize)
+        .unwrap_or(100)
+        .max(40);
+
+    let summary = summarize_fleet(projects);
+    let largest = doctor
+        .largest_project
+        .as_ref()
+        .map(|project| format!("{} {}", project.project, format_bytes(project.total)))
+        .unwrap_or_else(|| "none".to_string());
+
+    write_menu_line(output, "", width)?;
+    queue!(
+        output,
+        SetForegroundColor(Color::Green),
+        SetAttribute(Attribute::Bold),
+        Print("LeanMgr"),
+        ResetColor,
+        SetAttribute(Attribute::Reset),
+        Print("\n")
+    )?;
+    write_menu_line(output, "Manage disposable .lake caches", width)?;
+    write_menu_line(output, "", width)?;
+    write_metric_line(
+        output,
+        &[
+            ("Projects", summary.project_count.to_string()),
+            (
+                "Cached",
+                format!("{}/{}", summary.measured_count, summary.project_count),
+            ),
+            ("Reclaim", format_bytes(doctor.potential_hard_reclaim)),
+            ("Unused", doctor.unused_projects.len().to_string()),
+        ],
+        width,
+    )?;
+    write_menu_line(
+        output,
+        &format!(
+            "Missing paths {} | missing Lake files {} | largest {} | threshold {}d",
+            doctor.missing_paths.len(),
+            doctor.missing_lake_files.len(),
+            largest,
+            unused_days
+        ),
+        width,
+    )?;
+    write_menu_line(output, "", width)?;
+
+    for (index, (label, description)) in KEYBOARD_ACTIONS.iter().enumerate() {
+        let line = format!(
+            "{}. {:<18} {}",
+            index + 1,
+            label,
+            truncate_display(description, width.saturating_sub(26).max(12))
+        );
+        if index == selected {
+            queue!(
+                output,
+                SetForegroundColor(Color::Green),
+                SetAttribute(Attribute::Bold),
+                Print("> "),
+                Print(truncate_display(&line, width.saturating_sub(2))),
+                ResetColor,
+                SetAttribute(Attribute::Reset),
+                Print("\n")
+            )?;
+        } else {
+            write_menu_line(output, &format!("  {line}"), width)?;
+        }
+    }
+    write_menu_line(output, "", width)?;
+    write_menu_line(
+        output,
+        "Keys: Up/Down or j/k move | Enter open | 1-5 direct | r refresh | q quit",
+        width,
+    )?;
+    output.flush()?;
+    Ok(())
+}
+
+fn write_metric_line<W: Write>(
+    output: &mut W,
+    metrics: &[(&str, String)],
+    width: usize,
+) -> Result<()> {
+    let mut line = String::new();
+    for (index, (label, value)) in metrics.iter().enumerate() {
+        if index > 0 {
+            line.push_str("  ");
+        }
+        line.push('[');
+        line.push_str(label);
+        line.push(' ');
+        line.push_str(value);
+        line.push(']');
+    }
+    write_menu_line(output, &line, width)
+}
+
+fn write_menu_line<W: Write>(output: &mut W, line: &str, width: usize) -> Result<()> {
+    writeln!(output, "{}", truncate_display(line, width))?;
+    Ok(())
+}
+
+fn truncate_display(line: &str, width: usize) -> String {
+    if line.chars().count() <= width {
+        return line.to_string();
+    }
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+    let prefix = line.chars().take(width - 3).collect::<String>();
+    format!("{prefix}...")
+}
+
+fn read_menu_action(selected: &mut usize) -> Result<MenuAction> {
+    loop {
+        match read_key_code()? {
+            KeyCode::Char('q') | KeyCode::Esc => return Ok(MenuAction::Quit),
+            KeyCode::Char('r') => return Ok(MenuAction::Refresh),
+            KeyCode::Char(value @ '1'..='5') => {
+                return Ok(MenuAction::Open(value as usize - '1' as usize));
+            }
+            KeyCode::Enter => return Ok(MenuAction::Open(*selected)),
+            KeyCode::Up | KeyCode::Char('k') => {
+                *selected = selected.saturating_sub(1);
+                return Ok(MenuAction::Redraw);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if *selected + 1 < KEYBOARD_ACTIONS.len() {
+                    *selected += 1;
+                }
+                return Ok(MenuAction::Redraw);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn read_key_code() -> Result<KeyCode> {
+    loop {
+        if let Event::Key(key) = event::read()? {
+            return Ok(key.code);
+        }
+    }
+}
+
+fn run_menu_action(
+    index: usize,
+    projects: &[Project],
+    doctor: &DoctorReport,
+    unused_days: u64,
+) -> Result<()> {
+    let input = io::stdin();
+    let mut input = input.lock();
+    let mut output = io::stdout();
+    match index {
+        0 => print_project_list(projects, &mut output),
+        1 => print_doctor_summary(doctor, unused_days, &mut output),
+        2 => print_gc_dry_run(projects, unused_days, &mut output),
+        3 => print_clean_dry_run(projects, &mut input, &mut output),
+        4 => print_restore_command(projects, &mut input, &mut output),
+        _ => Ok(()),
     }
 }
 

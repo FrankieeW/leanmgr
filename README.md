@@ -47,7 +47,8 @@ brew install frankieew/tap/leanmgr
 ```
 
 From a local checkout, the same script builds from source and installs to
-`~/.local/bin` (override with `INSTALL_DIR`):
+`~/.local/bin` (override with `INSTALL_DIR`). It installs both `leanmgr` and the
+short interactive-menu command `lm`:
 
 ```sh
 scripts/install.sh
@@ -90,6 +91,7 @@ leanmgr scan ~/LeanProjects --yes
 Inspect:
 
 ```sh
+lm
 leanmgr list
 leanmgr list --sizes
 leanmgr size --all
@@ -159,20 +161,28 @@ delete them anyway. `gc` defaults to `--level hard` and, like `clean`, supports
 
 ## Interactive Assistant
 
-Use `leanmgr interact` when you want a guided terminal workflow instead of
-remembering individual commands:
+Use `lm` when you want a guided terminal workflow instead of remembering
+individual commands. It is the short interactive-menu entry point for
+`leanmgr`, similar to Mole's `mo` command:
 
 ```sh
+lm
+leanmgr
 leanmgr interact
 leanmgr interact --tag active
 leanmgr interact --unused-days 30
 ```
 
-The assistant displays a fleet dashboard with project counts, cached size
+Running `leanmgr` with no subcommand also opens the interactive assistant. The
+assistant prints a compact fleet dashboard with project counts, cached size
 coverage, reclaimable space, stale projects, missing paths, missing Lake files,
 toolchains, tags, and the largest cache. Its action menu can list projects,
-show doctor details, plan a stale-cache gc dry-run, plan a one-project clean
-dry-run, or build a restore command.
+show doctor details, plan a stale-cache gc dry-run, plan one-project cleanup,
+or build restore commands.
+
+Controls: use `1`-`5` to run an action, arrow keys or `j`/`k` to move, Enter
+to open, `r` to refresh diagnostics, and `q` to quit. It does not use a
+fullscreen alternate screen; output stays in the normal terminal scrollback.
 
 The interactive assistant is intentionally review-first. It does not delete
 cache directories itself; destructive cleanup remains in `leanmgr clean` and
@@ -197,6 +207,8 @@ quick project index view.
 ## Commands
 
 ```text
+lm
+leanmgr
 leanmgr init
 leanmgr add <path> [--name <name>] [--tag <tag>]...
 leanmgr remove <name-or-path>
