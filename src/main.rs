@@ -16,6 +16,7 @@ fn main() -> Result<()> {
         Commands::Doctor(args) => leanmgr::doctor::doctor_command(args),
         Commands::Gitignore(args) => leanmgr::gitignore::gitignore_command(args),
         Commands::Clean(args) => leanmgr::clean::clean_command(args),
+        Commands::Gc(args) => leanmgr::gc::gc_command(args),
         Commands::Restore(args) => leanmgr::restore::restore_command(args),
         Commands::Tag { command } => match command {
             TagCommands::Add(args) => leanmgr::tags::add_tag(args),

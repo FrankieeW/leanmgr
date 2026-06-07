@@ -38,6 +38,8 @@ pub enum Commands {
     Gitignore(GitignoreArgs),
     /// Remove `.lake`-scoped cache paths.
     Clean(CleanArgs),
+    /// Reclaim `.lake` cache across projects by policy, skipping unrecoverable caches.
+    Gc(GcArgs),
     /// Run `lake exe cache get` for selected projects.
     Restore(RestoreArgs),
     /// Manage project tags.
@@ -278,6 +280,35 @@ pub enum CleanLevel {
     DepsBuild,
     /// Remove `<project>/.lake`.
     Hard,
+}
+
+/// Arguments for `leanmgr gc`.
+#[derive(Debug, Args)]
+pub struct GcArgs {
+    /// Target projects whose `.lake` is older than this many days.
+    #[arg(long, conflicts_with = "target")]
+    pub unused_days: Option<u64>,
+    /// Reclaim until at least this much space is freed (e.g. 20GiB).
+    #[arg(long)]
+    pub target: Option<String>,
+    /// Filter by tag. Default scope is all projects.
+    #[arg(long)]
+    pub tag: Option<String>,
+    /// Cleanup level.
+    #[arg(long, value_enum, default_value_t = CleanLevel::Hard)]
+    pub level: CleanLevel,
+    /// Also delete caches that are not recoverable.
+    #[arg(long)]
+    pub include_unrecoverable: bool,
+    /// Print the plan without deleting.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Skip confirmation prompt.
+    #[arg(long)]
+    pub force: bool,
+    /// Emit JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Arguments for `leanmgr restore`.
