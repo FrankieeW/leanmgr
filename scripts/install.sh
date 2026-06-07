@@ -18,7 +18,7 @@ set -euo pipefail
 
 REPO="FrankieeW/leanmgr"
 TAP="frankieew/tap/leanmgr"
-VERSION="${LEANMGR_VERSION:-v0.1.0}"
+VERSION="${LEANMGR_VERSION:-v0.2.0}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }

@@ -59,7 +59,7 @@ Script behavior is controlled by environment variables:
 | Variable | Effect |
 | --- | --- |
 | `LEANMGR_NO_BREW=1` | Skip Homebrew even if installed. |
-| `LEANMGR_VERSION` | Git tag for the cargo fallback (default `v0.1.0`). |
+| `LEANMGR_VERSION` | Git tag for the cargo fallback (default `v0.2.0`). |
 | `INSTALL_DIR` | Target dir for the local-build path (default `~/.local/bin`). |
 
 ## Configuration

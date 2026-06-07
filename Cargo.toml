@@ -1,6 +1,6 @@
 [package]
 name = "leanmgr"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Manage disposable .lake cache state across many Lean 4 projects"
 license = "MIT"
