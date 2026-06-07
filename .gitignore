@@ -1,0 +1,8 @@
+/target
+.DS_Store
+.omc/
+.omx/logs/
+.omx/state/
+.omx/*.json
+!.omx/plans/
+!.omx/plans/*.md
