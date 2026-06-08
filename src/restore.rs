@@ -71,7 +71,6 @@ fn lake_runner(dir: &Path, args: &[&str]) -> Result<Output> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::process::ExitStatusExt;
     use std::process::{ExitStatus, Output};
 
     fn project(name: &str) -> Project {
@@ -87,16 +86,24 @@ mod tests {
         }
     }
 
-    fn exit_status(code: i32) -> ExitStatus {
-        ExitStatus::from_raw(code << 8)
-    }
-
     fn output(code: i32, stdout: &str, stderr: &str) -> Output {
         Output {
             status: exit_status(code),
             stdout: stdout.as_bytes().to_vec(),
             stderr: stderr.as_bytes().to_vec(),
         }
+    }
+
+    #[cfg(unix)]
+    fn exit_status(code: i32) -> ExitStatus {
+        use std::os::unix::process::ExitStatusExt;
+        ExitStatus::from_raw(code << 8)
+    }
+
+    #[cfg(windows)]
+    fn exit_status(code: i32) -> ExitStatus {
+        use std::os::windows::process::ExitStatusExt;
+        ExitStatus::from_raw(code as u32)
     }
 
     #[test]
