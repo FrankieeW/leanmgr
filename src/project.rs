@@ -29,7 +29,10 @@ pub struct Project {
     #[serde(default)]
     pub last_seen_at: Option<String>,
     /// Timestamp string of the project's most recent commit, if known.
-    #[serde(default)]
+    ///
+    /// Accepts the legacy `last_commit_at` spelling as a serde alias for
+    /// backward compatibility with older `config.json` files.
+    #[serde(default, alias = "last_commit_at")]
     pub last_committed_at: Option<String>,
     /// Cached `.lake` size information for fast list output.
     #[serde(default)]
@@ -193,7 +196,7 @@ pub fn select_projects(
     tag: Option<&str>,
     all: bool,
 ) -> Result<Vec<Project>> {
-    crate::paths::ensure_selector(project_selector.is_some(), tag.is_some(), all)?;
+    ensure_selector(project_selector.is_some(), tag.is_some(), all)?;
     let config = load_config()?;
     let selected = if let Some(selector) = project_selector {
         let matched: Vec<Project> = config
@@ -215,6 +218,21 @@ pub fn select_projects(
         config.projects
     };
     Ok(selected)
+}
+
+/// Ensure that a required project selector mode is valid.
+///
+/// Project selection is a 3-way exclusive choice between a project
+/// name/path, a `--tag` filter, and `--all`. Exactly one must be set.
+fn ensure_selector(project: bool, tag: bool, all: bool) -> Result<()> {
+    let count = [project, tag, all]
+        .into_iter()
+        .filter(|value| *value)
+        .count();
+    if count == 1 {
+        return Ok(());
+    }
+    bail!("select exactly one of project, --tag, or --all");
 }
 
 /// Validate that a path contains a Lake file.

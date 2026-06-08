@@ -289,6 +289,12 @@ leanmgr ai skill show leanmgr-cache-manager --format claude
 `./leanmgr-cache-manager/SKILL.md`. If none exists, install the skill or point
 `LEANMGR_SKILL_PATH` at a local checkout.
 
+The `--format` flag adapts the printed SKILL.md body to match the receiving
+agent's task contract header (`# Codex Task Contract` for codex,
+`# Claude Code Task Context` for claude). When the body already starts with
+the matching header it is passed through unchanged; otherwise the header is
+replaced or prepended.
+
 To install a skill, LeanMgr first tries the ecosystem command:
 
 ```sh

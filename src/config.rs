@@ -84,3 +84,64 @@ pub fn touch_seen(config: &mut Config) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Project.last_committed_at` carries a `serde(alias = "last_commit_at")`
+    /// so configs written before the rename keep loading. Both spellings must
+    /// populate the same field.
+    #[test]
+    fn legacy_last_commit_at_alias_loads() {
+        let legacy = r#"{
+            "version": 1,
+            "projects": [{
+                "name": "demo",
+                "path": "/tmp/demo",
+                "last_commit_at": "1700000000"
+            }]
+        }"#;
+        let config: Config = serde_json::from_str(legacy).unwrap();
+        assert_eq!(config.projects.len(), 1);
+        assert_eq!(
+            config.projects[0].last_committed_at.as_deref(),
+            Some("1700000000")
+        );
+    }
+
+    /// Canonical `last_committed_at` spelling still loads after the alias is
+    /// added; the alias must not steal the canonical name.
+    #[test]
+    fn canonical_last_committed_at_still_loads() {
+        let canonical = r#"{
+            "version": 1,
+            "projects": [{
+                "name": "demo",
+                "path": "/tmp/demo",
+                "last_committed_at": "1700000000"
+            }]
+        }"#;
+        let config: Config = serde_json::from_str(canonical).unwrap();
+        assert_eq!(
+            config.projects[0].last_committed_at.as_deref(),
+            Some("1700000000")
+        );
+    }
+
+    /// Loading the shipped example config must succeed with the current
+    /// schema. CI uses this to catch future drift between the schema and
+    /// its canonical example.
+    #[test]
+    fn examples_config_loads() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples")
+            .join("config.json");
+        let content = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let config: Config = serde_json::from_str(&content)
+            .unwrap_or_else(|error| panic!("example config is invalid: {error}"));
+        assert_eq!(config.version, 1);
+        assert!(!config.projects.is_empty());
+    }
+}

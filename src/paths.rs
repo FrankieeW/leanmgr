@@ -1,6 +1,6 @@
 //! Path helpers for cross-platform config and project handling.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -66,16 +66,4 @@ pub fn normalize_existing_or_join(path: &Path) -> Result<PathBuf> {
         return Ok(path.to_path_buf());
     }
     Ok(env::current_dir()?.join(path))
-}
-
-/// Ensure that a required project selector mode is valid.
-pub fn ensure_selector(project: bool, tag: bool, all: bool) -> Result<()> {
-    let count = [project, tag, all]
-        .into_iter()
-        .filter(|value| *value)
-        .count();
-    if count == 1 {
-        return Ok(());
-    }
-    bail!("select exactly one of project, --tag, or --all");
 }
