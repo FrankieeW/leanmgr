@@ -379,7 +379,17 @@ pub fn matches_project(project: &Project, selector: &str) -> bool {
         return true;
     }
     let selector_path = expand_tilde(selector);
-    project.expanded_path() == selector_path
+    let project_path = project.expanded_path();
+    if project_path == selector_path {
+        return true;
+    }
+    // Stored paths are canonicalised when a project is added, so a selector
+    // that reaches the same directory through a symlink has to be
+    // canonicalised as well to match.
+    match (selector_path.canonicalize(), project_path.canonicalize()) {
+        (Ok(selector), Ok(project)) => selector == project,
+        _ => false,
+    }
 }
 
 /// Filter projects by optional tag.
