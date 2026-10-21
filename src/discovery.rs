@@ -117,7 +117,10 @@ pub fn scan_projects(root: &Path) -> ScanOutcome {
     let walker = WalkDir::new(root)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|entry| !is_pruned(entry));
+        // The root itself is never pruned: scanning a directory that
+        // happens to be named `target` or `.lake` must still find the
+        // projects inside it.
+        .filter_entry(|entry| entry.depth() == 0 || !is_pruned(entry));
 
     for entry in walker {
         let Ok(entry) = entry else {
@@ -237,6 +240,24 @@ mod tests {
     use super::*;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// The pruning rule matches on directory names like `target` and
+    /// `.lake`. It must not apply to the scan root itself, otherwise
+    /// scanning a directory with one of those names silently finds
+    /// nothing.
+    #[test]
+    fn scan_does_not_prune_the_scan_root() {
+        let root = test_dir("scan_does_not_prune_the_scan_root");
+        let target = root.join("target");
+        fs::create_dir_all(target.join("inner")).unwrap();
+        fs::write(target.join("inner/lakefile.toml"), b"name = \"inner\"").unwrap();
+
+        let found = scan_projects(&target).projects;
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "inner");
+
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn scan_finds_lake_projects_and_skips_lake_cache() {
