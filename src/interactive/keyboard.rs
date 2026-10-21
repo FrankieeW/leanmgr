@@ -43,7 +43,11 @@ const KEYBOARD_ACTIONS: &[(&str, &str)] = &[
 ];
 
 /// Run the keyboard dashboard for the duration of one session.
-pub(super) fn run_keyboard_session(projects: &[Project], unused_days: u64) -> Result<()> {
+pub(super) fn run_keyboard_session(
+    projects: &[Project],
+    unused_days: u64,
+    tag: Option<&str>,
+) -> Result<()> {
     if projects.is_empty() {
         println!("No indexed projects in this scope.");
         println!("Add projects with `leanmgr add <path>` or `leanmgr scan <root>`.");
@@ -72,7 +76,7 @@ pub(super) fn run_keyboard_session(projects: &[Project], unused_days: u64) -> Re
             MenuAction::Open(index) => {
                 println!();
                 // A bad answer inside an action must not end the session.
-                if let Err(error) = run_menu_action(index, projects, &doctor, unused_days) {
+                if let Err(error) = run_menu_action(index, projects, &doctor, unused_days, tag) {
                     println!("Error: {error:#}");
                 }
                 println!();
@@ -303,6 +307,7 @@ fn run_menu_action(
     projects: &[Project],
     doctor: &DoctorReport,
     unused_days: u64,
+    tag: Option<&str>,
 ) -> Result<()> {
     let input = std::io::stdin();
     let mut input = input.lock();
@@ -310,7 +315,7 @@ fn run_menu_action(
     match index {
         0 => print_project_list(projects, &mut output),
         1 => print_doctor_summary(doctor, unused_days, &mut output),
-        2 => print_gc_dry_run(projects, unused_days, &mut output),
+        2 => print_gc_dry_run(projects, unused_days, tag, &mut output),
         3 => print_clean_dry_run(projects, &mut input, &mut output),
         4 => print_restore_command(projects, &mut input, &mut output),
         _ => Ok(()),

@@ -93,6 +93,7 @@ pub(super) fn print_doctor_summary<W: Write>(
 pub(super) fn print_gc_dry_run<W: Write>(
     projects: &[Project],
     unused_days: u64,
+    tag: Option<&str>,
     output: &mut W,
 ) -> Result<()> {
     let opts = GcOptions {
@@ -123,9 +124,16 @@ pub(super) fn print_gc_dry_run<W: Write>(
             writeln!(output, "  {} {}", skip.project, skip.reason)?;
         }
     }
+    // The suggested command must cover exactly the scope that was previewed.
+    // Without `--tag` it would reach every indexed project, which is a
+    // different — and much larger — set than the one on screen.
+    let scope = match tag {
+        Some(tag) => format!(" --tag {}", shell_arg(tag)),
+        None => String::new(),
+    };
     writeln!(
         output,
-        "To execute after review: leanmgr gc --unused-days {unused_days} --level hard"
+        "To execute after review: leanmgr gc --unused-days {unused_days} --level hard{scope}"
     )?;
     Ok(())
 }
@@ -225,4 +233,59 @@ pub(super) fn choose_clean_level<R: BufRead, W: Write>(
     let level =
         prompt("Clean level", input, output)?.context("no clean level selected (end of input)")?;
     parse_clean_level(level.trim())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::project::Project;
+
+    fn project(name: &str, tags: Vec<&str>) -> Project {
+        Project {
+            name: name.to_string(),
+            path: format!("/tmp/{name}"),
+            tags: tags.into_iter().map(str::to_string).collect(),
+            description: None,
+            added_at: None,
+            last_seen_at: None,
+            last_committed_at: None,
+            size_cache: None,
+        }
+    }
+
+    /// The command the assistant suggests after a gc preview must cover
+    /// exactly the scope that was previewed. Without `--tag` it would
+    /// reach every indexed project, including ones the user never saw.
+    #[test]
+    fn gc_suggestion_keeps_the_tag_scope() {
+        let projects = vec![project("demo", vec!["archived"])];
+        let mut out: Vec<u8> = Vec::new();
+        print_gc_dry_run(&projects, 90, Some("archived"), &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("leanmgr gc --unused-days 90 --level hard --tag archived"),
+            "suggested command must carry the tag scope, got: {text}"
+        );
+    }
+
+    #[test]
+    fn gc_suggestion_without_a_tag_has_no_tag_flag() {
+        let projects = vec![project("demo", vec![])];
+        let mut out: Vec<u8> = Vec::new();
+        print_gc_dry_run(&projects, 90, None, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("leanmgr gc --unused-days 90 --level hard"));
+        assert!(!text.contains("--tag"));
+    }
+
+    /// A tag with shell metacharacters must be quoted, because the
+    /// suggestion is meant to be pasted into a shell.
+    #[test]
+    fn gc_suggestion_quotes_the_tag() {
+        let projects = vec![project("demo", vec!["two words"])];
+        let mut out: Vec<u8> = Vec::new();
+        print_gc_dry_run(&projects, 90, Some("two words"), &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("--tag 'two words'"), "got: {text}");
+    }
 }

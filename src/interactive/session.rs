@@ -25,11 +25,17 @@ pub fn interact_command(args: InteractArgs) -> Result<()> {
         .cloned()
         .collect();
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-        return run_keyboard_session(&projects, args.unused_days);
+        return run_keyboard_session(&projects, args.unused_days, args.tag.as_deref());
     }
     let input = std::io::stdin();
     let mut output = std::io::stdout();
-    run_session(&projects, args.unused_days, input.lock(), &mut output)
+    run_session(
+        &projects,
+        args.unused_days,
+        args.tag.as_deref(),
+        input.lock(),
+        &mut output,
+    )
 }
 
 /// Pipe-mode session: print the dashboard, then loop on a numbered
@@ -38,6 +44,7 @@ pub fn interact_command(args: InteractArgs) -> Result<()> {
 pub fn run_session<R: BufRead, W: Write>(
     projects: &[Project],
     unused_days: u64,
+    tag: Option<&str>,
     mut input: R,
     output: &mut W,
 ) -> Result<()> {
@@ -63,7 +70,7 @@ pub fn run_session<R: BufRead, W: Write>(
         let result = match choice.trim() {
             "1" => print_project_list(projects, output),
             "2" => print_doctor_summary(&doctor, unused_days, output),
-            "3" => print_gc_dry_run(projects, unused_days, output),
+            "3" => print_gc_dry_run(projects, unused_days, tag, output),
             "4" => print_clean_dry_run(projects, &mut input, output),
             "5" => print_restore_command(projects, &mut input, output),
             "6" => {
