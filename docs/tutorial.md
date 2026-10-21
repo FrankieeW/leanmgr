@@ -127,5 +127,5 @@ executed=$(echo "$result" | jq .executed)
 
 - `leanmgr --help` — command list
 - `leanmgr <command> --help` — flag details
-- `leanmgr completions zsh` — shell completions (Homebrew installs them for you)
+- `leanmgr completions zsh` — shell completions
 - `leanmgr ai context --format codex` — agent-friendly project snapshot

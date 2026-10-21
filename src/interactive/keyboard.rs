@@ -119,10 +119,7 @@ fn render_keyboard_menu<W: Write>(
     previous_lines: u16,
     output: &mut W,
 ) -> Result<u16> {
-    let width = terminal::size()
-        .map(|(width, _)| width as usize)
-        .unwrap_or(100)
-        .max(40);
+    let width = frame_width(terminal::size().ok().map(|(columns, _)| columns));
     let mut frame = Vec::new();
     write_frame_header(&mut frame, projects, doctor, unused_days, width)?;
     write_frame_menu(&mut frame, selected, width)?;
@@ -138,6 +135,20 @@ fn render_keyboard_menu<W: Write>(
     output.write_all(&frame)?;
     output.flush()?;
     Ok(line_count(&frame))
+}
+
+/// Columns each frame line may use. One column is left free because some
+/// terminals wrap as soon as the last column is written, and the width is
+/// never raised above the real terminal: a wrapped line would make the
+/// redraw rewind one row too few.
+fn frame_width(terminal_columns: Option<u16>) -> usize {
+    const FALLBACK_COLUMNS: usize = 100;
+    terminal_columns
+        .map(usize::from)
+        .filter(|columns| *columns > 0)
+        .unwrap_or(FALLBACK_COLUMNS)
+        .saturating_sub(1)
+        .max(1)
 }
 
 fn line_count(frame: &[u8]) -> u16 {
@@ -325,6 +336,62 @@ mod tests {
         let text = String::from_utf8_lossy(&frame).to_string();
         assert_eq!(usize::from(line_count(&frame)), text.lines().count());
         assert_eq!(line_count(&frame), 14);
+    }
+
+    /// Remove ANSI escape sequences (`ESC [ ... letter`) so tests can
+    /// measure what the terminal actually shows.
+    fn visible(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\x1b' {
+                for next in chars.by_ref() {
+                    if next.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn frame_lines_never_exceed_the_width_even_with_wide_characters() {
+        use crate::size::ProjectSize;
+        use unicode_width::UnicodeWidthStr;
+        let doctor = DoctorReport {
+            largest_project: Some(ProjectSize {
+                project: "代数数论项目".repeat(8),
+                total: 1 << 30,
+                ..ProjectSize::default()
+            }),
+            ..DoctorReport::default()
+        };
+        for columns in [10u16, 24, 40, 80, 200] {
+            let width = frame_width(Some(columns));
+            let mut frame = Vec::new();
+            write_frame_header(&mut frame, &[], &doctor, 90, width).unwrap();
+            write_frame_menu(&mut frame, 1, width).unwrap();
+            let text = visible(&String::from_utf8_lossy(&frame));
+            for line in text.lines() {
+                assert!(
+                    line.width() < usize::from(columns),
+                    "{columns} columns: {line:?} is {} wide",
+                    line.width()
+                );
+            }
+            assert_eq!(usize::from(line_count(&frame)), text.lines().count());
+        }
+    }
+
+    #[test]
+    fn frame_width_uses_the_real_terminal_and_a_fallback() {
+        assert_eq!(frame_width(Some(80)), 79);
+        assert_eq!(frame_width(Some(1)), 1);
+        assert_eq!(frame_width(Some(0)), 99);
+        assert_eq!(frame_width(None), 99);
     }
 
     #[test]

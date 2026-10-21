@@ -66,14 +66,17 @@ Script behavior is controlled by environment variables:
 ### Shell Completions
 
 `leanmgr completions <shell>` prints a completion script for `bash`, `zsh`,
-`fish`, `powershell`, or `elvish`. Homebrew installs them automatically; for
-other installs, write the script where your shell looks for completions:
+`fish`, `powershell`, or `elvish`. Write it where your shell looks for
+completions:
 
 ```sh
 leanmgr completions zsh > "${fpath[1]}/_leanmgr"
 leanmgr completions bash > ~/.local/share/bash-completion/completions/leanmgr
 leanmgr completions fish > ~/.config/fish/completions/leanmgr.fish
 ```
+
+The script registers under the name you run it as, so `lm completions zsh`
+produces completions for `lm`.
 
 ## Configuration
 
@@ -215,8 +218,8 @@ to open, `r` to refresh diagnostics, and `q`, Esc, or Ctrl-C to quit. The
 diagnostics are computed once per session (they walk every `.lake`), so
 navigation is instant; press `r` to recompute them. It does not use a
 fullscreen alternate screen; output stays in the normal terminal scrollback.
-When stdin is not a terminal, the assistant reads numbered answers line by line
-and exits at end of input.
+When stdin or stdout is not a terminal, the assistant reads numbered answers
+line by line and exits at end of input.
 
 The interactive assistant is intentionally review-first. It does not delete
 cache directories itself; destructive cleanup remains in `leanmgr clean` and

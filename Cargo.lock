@@ -303,6 +303,7 @@ dependencies = [
  "indicatif",
  "serde",
  "serde_json",
+ "unicode-width",
  "walkdir",
 ]
 

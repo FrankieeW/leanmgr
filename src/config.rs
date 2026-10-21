@@ -5,6 +5,7 @@ use crate::project::Project;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 /// On-disk configuration schema.
@@ -61,23 +62,47 @@ pub fn save_config(config: &Config) -> Result<()> {
 
 /// Write `config` to `path` atomically.
 ///
-/// The JSON is written to a sibling temporary file and renamed over the
-/// target, so an interrupted save (Ctrl-C, full disk, crash) leaves the
-/// previous index intact instead of a truncated `config.json`.
+/// The JSON is written to a temporary file beside the real target, synced,
+/// and renamed over it, so an interrupted save (Ctrl-C, full disk, crash)
+/// leaves the previous index intact instead of a truncated file. When
+/// `config.json` is a symlink (as dotfile managers create), the link's
+/// target is replaced and the link itself is kept; the target's
+/// permissions carry over to the new file.
 fn write_config_to(path: &Path, config: &Config) -> Result<()> {
-    if let Some(parent) = path.parent() {
+    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let content = serde_json::to_string_pretty(config)?;
-    let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
-    fs::write(&tmp, format!("{content}\n"))
-        .with_context(|| format!("failed to write {}", tmp.display()))?;
-    if let Err(error) = fs::rename(&tmp, path) {
+    let content = format!("{}\n", serde_json::to_string_pretty(config)?);
+    let mut tmp_name = target.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(format!(".tmp-{}", std::process::id()));
+    let tmp = target.with_file_name(tmp_name);
+
+    let result =
+        write_synced(&tmp, content.as_bytes(), fs::metadata(&target).ok()).and_then(|()| {
+            fs::rename(&tmp, &target)
+                .with_context(|| format!("failed to replace {}", target.display()))
+        });
+    if result.is_err() {
         let _ = fs::remove_file(&tmp);
-        return Err(error).with_context(|| format!("failed to replace {}", path.display()));
     }
-    Ok(())
+    result
+}
+
+/// Create `path` with `content`, flushed to disk. Permissions are copied
+/// from `like` before any content is written, so a private (0600) config
+/// is never briefly world-readable.
+fn write_synced(path: &Path, content: &[u8], like: Option<fs::Metadata>) -> Result<()> {
+    let mut file =
+        fs::File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
+    if let Some(metadata) = like {
+        // Best effort: a filesystem that cannot set modes still gets the save.
+        let _ = fs::set_permissions(path, metadata.permissions());
+    }
+    file.write_all(content)
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("failed to write {}", path.display()))
 }
 
 /// Update last-seen timestamps for projects that still exist.
@@ -164,6 +189,56 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(entries, vec![std::ffi::OsString::from("config.json")]);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Dotfile managers often symlink `config.json`. Saving must update the
+    /// link's target, keep the link, and keep the target's permissions.
+    #[cfg(unix)]
+    #[test]
+    fn write_config_to_writes_through_symlinks_and_keeps_mode() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("leanmgr-config-symlink-{nonce}"));
+        fs::create_dir_all(dir.join("dotfiles")).unwrap();
+        let real = dir.join("dotfiles").join("leanmgr.json");
+        fs::write(&real, "{\"version\": 1, \"projects\": []}\n").unwrap();
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o600)).unwrap();
+        let link = dir.join("config.json");
+        symlink(&real, &link).unwrap();
+
+        let mut config = Config::default();
+        config.projects.push(crate::project::Project {
+            name: "demo".to_string(),
+            path: "/tmp/demo".to_string(),
+            tags: Vec::new(),
+            description: None,
+            added_at: None,
+            last_seen_at: None,
+            last_committed_at: None,
+            size_cache: None,
+        });
+        write_config_to(&link, &config).unwrap();
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let saved: Config = serde_json::from_str(&fs::read_to_string(&real).unwrap()).unwrap();
+        assert_eq!(saved.projects.len(), 1);
+        let mode = fs::metadata(&real).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let leftovers: Vec<_> = fs::read_dir(dir.join("dotfiles"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(leftovers, vec![std::ffi::OsString::from("leanmgr.json")]);
 
         fs::remove_dir_all(&dir).unwrap();
     }

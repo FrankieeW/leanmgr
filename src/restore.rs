@@ -13,9 +13,12 @@ use std::process::Output;
 /// The command restore runs for projects that can download artifacts.
 const CACHE_GET: &str = "lake exe cache get";
 
+/// Skip reason for a project whose directory no longer exists.
+const PATH_MISSING: &str = "path missing";
+
 /// What restore does for one project.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RestoreStep {
+pub(crate) enum RestoreStep {
     /// Run `lake exe cache get` in the project directory.
     CacheGet,
     /// Leave the project alone, for the given reason.
@@ -28,10 +31,10 @@ enum RestoreStep {
 /// for Mathlib and projects that depend on it. Other projects are skipped
 /// with a pointer to `lake build` instead of failing with "unknown
 /// executable cache".
-fn plan_restore(project: &Project) -> RestoreStep {
+pub(crate) fn plan_restore(project: &Project) -> RestoreStep {
     let root = project.expanded_path();
     if !root.is_dir() {
-        return RestoreStep::Skip("path missing");
+        return RestoreStep::Skip(PATH_MISSING);
     }
     if !requires_mathlib(&root) {
         return RestoreStep::Skip("no Mathlib dependency; `lake build` rebuilds it");
@@ -53,6 +56,19 @@ pub fn restore_command(args: RestoreArgs) -> Result<()> {
     if args.dry_run {
         print_restore_plan(&plan);
         return Ok(());
+    }
+    // Restoring a project the user named explicitly cannot succeed when
+    // its directory is gone; that is an error, not a quiet skip.
+    if args.project.is_some()
+        && let Some((project, _)) = plan
+            .iter()
+            .find(|(_, step)| *step == RestoreStep::Skip(PATH_MISSING))
+    {
+        bail!(
+            "cannot restore {}: {} no longer exists",
+            project.name,
+            project.path
+        );
     }
 
     for (project, step) in &plan {
@@ -197,7 +213,7 @@ mod tests {
     #[test]
     fn plan_skips_missing_paths() {
         let project = project_at(Path::new("/nonexistent/leanmgr-restore-gone"));
-        assert_eq!(plan_restore(&project), RestoreStep::Skip("path missing"));
+        assert_eq!(plan_restore(&project), RestoreStep::Skip(PATH_MISSING));
     }
 
     fn project(name: &str) -> Project {

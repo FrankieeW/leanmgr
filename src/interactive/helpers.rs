@@ -6,6 +6,7 @@
 use crate::cli::CleanLevel;
 use anyhow::{Result, bail};
 use std::io::{BufRead, Write};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Read one line of input from the user, prefixed with `label> `.
 ///
@@ -61,15 +62,27 @@ pub(super) fn print_table_to<W: Write>(
     Ok(())
 }
 
-/// Truncate `line` to `width` columns, appending `...` when it was longer.
+/// Truncate `line` to `width` terminal columns, appending `...` when it
+/// was longer. Wide characters (CJK) count as two columns, so the result
+/// never wraps — the keyboard redraw relies on one output line per row.
 pub(super) fn truncate_display(line: &str, width: usize) -> String {
-    if line.chars().count() <= width {
+    if line.width() <= width {
         return line.to_string();
     }
     if width <= 3 {
         return ".".repeat(width);
     }
-    let prefix = line.chars().take(width - 3).collect::<String>();
+    let budget = width - 3;
+    let mut used = 0;
+    let mut prefix = String::new();
+    for ch in line.chars() {
+        let ch_width = ch.width().unwrap_or(0);
+        if used + ch_width > budget {
+            break;
+        }
+        used += ch_width;
+        prefix.push(ch);
+    }
     format!("{prefix}...")
 }
 

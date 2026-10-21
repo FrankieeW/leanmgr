@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use serde::Serialize;
 use std::io::{self, Write};
+use unicode_width::UnicodeWidthStr;
 
 /// Print a serializable value as pretty JSON.
 pub fn print_json<T: Serialize>(value: &T) -> Result<()> {
@@ -19,20 +20,17 @@ pub fn print_table(headers: &[&str], rows: &[Vec<String>]) {
 
 /// Write a table with left-aligned, space-separated columns.
 ///
-/// Widths are measured in characters, matching how `{:width$}` pads. The
-/// last column is not padded so lines carry no trailing whitespace.
+/// Widths are terminal display columns, so wide characters (CJK) line up.
+/// The last column is not padded so lines carry no trailing whitespace.
 pub fn write_table<W: Write>(
     output: &mut W,
     headers: &[&str],
     rows: &[Vec<String>],
 ) -> io::Result<()> {
-    let mut widths: Vec<usize> = headers
-        .iter()
-        .map(|header| header.chars().count())
-        .collect();
+    let mut widths: Vec<usize> = headers.iter().map(|header| header.width()).collect();
     for row in rows {
         for (index, cell) in row.iter().enumerate() {
-            widths[index] = widths[index].max(cell.chars().count());
+            widths[index] = widths[index].max(cell.width());
         }
     }
 
@@ -47,7 +45,8 @@ pub fn write_table<W: Write>(
 fn write_row<W: Write>(output: &mut W, cells: &[&str], widths: &[usize]) -> io::Result<()> {
     for (index, cell) in cells.iter().enumerate() {
         if index + 1 < cells.len() {
-            write!(output, "{cell:width$}  ", width = widths[index])?;
+            let padding = widths[index].saturating_sub(cell.width());
+            write!(output, "{cell}{:padding$}  ", "")?;
         } else {
             write!(output, "{cell}")?;
         }
@@ -70,7 +69,8 @@ pub fn format_age(stored: &str, now: u64) -> String {
         elapsed if elapsed < HOUR => format!("{}m ago", elapsed / MINUTE),
         elapsed if elapsed < DAY => format!("{}h ago", elapsed / HOUR),
         elapsed if elapsed < 30 * DAY => format!("{}d ago", elapsed / DAY),
-        elapsed if elapsed < 365 * DAY => format!("{}mo ago", elapsed / (30 * DAY)),
+        // 30-day months would reach "12mo" for days 360-364; cap below a year.
+        elapsed if elapsed < 365 * DAY => format!("{}mo ago", (elapsed / (30 * DAY)).min(11)),
         elapsed => format!("{}y ago", elapsed / (365 * DAY)),
     }
 }
@@ -176,18 +176,21 @@ mod tests {
     }
 
     #[test]
-    fn write_table_pads_by_characters_not_bytes() {
-        // "数学" is 6 bytes but 2 characters; padding by byte length
-        // would push the next column 4 columns too far right.
+    fn write_table_pads_by_display_width() {
+        // "数学" is 6 bytes and 2 characters but 4 terminal columns wide;
+        // only display width keeps the next column aligned.
         let mut out = Vec::new();
         write_table(
             &mut out,
             &["NAME", "TAGS"],
-            &[vec!["数学".to_string(), "x".to_string()]],
+            &[
+                vec!["数学".to_string(), "x".to_string()],
+                vec!["é".to_string(), "y".to_string()],
+            ],
         )
         .unwrap();
         let text = String::from_utf8(out).unwrap();
-        assert_eq!(text, "NAME  TAGS\n数学    x\n");
+        assert_eq!(text, "NAME  TAGS\n数学  x\né     y\n");
     }
 
     #[test]
@@ -199,6 +202,11 @@ mod tests {
         assert_eq!(format_age(&(now - 3 * 3600).to_string(), now), "3h ago");
         assert_eq!(format_age(&(now - 2 * 86_400).to_string(), now), "2d ago");
         assert_eq!(format_age(&(now - 90 * 86_400).to_string(), now), "3mo ago");
+        assert_eq!(
+            format_age(&(now - 362 * 86_400).to_string(), now),
+            "11mo ago"
+        );
+        assert_eq!(format_age(&(now - 365 * 86_400).to_string(), now), "1y ago");
         assert_eq!(format_age(&(now - 800 * 86_400).to_string(), now), "2y ago");
     }
 

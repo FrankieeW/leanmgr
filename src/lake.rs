@@ -31,20 +31,32 @@ pub fn read_toolchain(root: &Path) -> Option<String> {
 /// Return true when the project at `root` is Mathlib or depends on it,
 /// i.e. when `lake exe cache get` has prebuilt artifacts to download.
 ///
-/// `lake-manifest.json` lists every resolved package, including
-/// transitive ones, so it is authoritative when present and parseable.
-/// Without it, fall back to looking for a `mathlib` requirement in the
-/// Lake file.
+/// Either source of truth is enough. `lake-manifest.json` lists every
+/// resolved package, including transitive ones; the Lake file catches a
+/// `require mathlib` added since the manifest was last written (or a
+/// project with no manifest yet). Erring towards "yes" is deliberate:
+/// a wrong "yes" costs one failed `cache get`, a wrong "no" sends the user
+/// to build Mathlib from source.
 pub fn requires_mathlib(root: &Path) -> bool {
     let manifest = fs::read_to_string(root.join("lake-manifest.json"))
         .ok()
         .and_then(|content| serde_json::from_str::<Value>(&content).ok());
-    if let Some(manifest) = manifest {
-        return manifest_mentions_mathlib(&manifest);
-    }
-    LAKEFILES.iter().any(|name| {
-        fs::read_to_string(root.join(name)).is_ok_and(|content| content.contains("mathlib"))
-    })
+    manifest.as_ref().is_some_and(manifest_mentions_mathlib)
+        || LAKEFILES.iter().any(|name| {
+            fs::read_to_string(root.join(name))
+                .is_ok_and(|content| lakefile_mentions_mathlib(&content))
+        })
+}
+
+/// Recognize the ways a Lake file names Mathlib as a dependency (or is
+/// Mathlib): TOML `name = "mathlib"`, Lean `require mathlib ...` or
+/// `require "leanprover-community" / "mathlib"`, and Mathlib's own
+/// `package mathlib`. A bare substring would also match unrelated names
+/// such as `mathlibStandardSet` or a package called `withmathlib`.
+fn lakefile_mentions_mathlib(content: &str) -> bool {
+    content.contains("\"mathlib\"")
+        || content.contains("require mathlib")
+        || content.contains("package mathlib")
 }
 
 fn manifest_mentions_mathlib(manifest: &Value) -> bool {
@@ -152,18 +164,53 @@ mod tests {
     }
 
     #[test]
-    fn manifest_without_mathlib_wins_over_lakefile_text() {
-        // The manifest is authoritative: a stray "mathlib" in a lakefile
-        // comment must not flip the answer once dependencies are resolved.
-        let root = tmp("manifest_no_dep");
+    fn stale_manifest_does_not_hide_a_new_mathlib_require() {
+        // `require mathlib` was added after the manifest was last written;
+        // skipping restore here would send the user to build Mathlib.
+        let root = tmp("manifest_stale");
         fs::write(
             root.join("lake-manifest.json"),
             br#"{"version": "1.1.0", "name": "Demo", "packages": [{"type": "git", "name": "batteries"}]}"#,
         )
         .unwrap();
-        fs::write(root.join("lakefile.lean"), b"-- not using mathlib yet").unwrap();
+        fs::write(
+            root.join("lakefile.lean"),
+            b"import Lake\nrequire mathlib from git \"https://github.com/leanprover-community/mathlib4\"\n",
+        )
+        .unwrap();
+        assert!(requires_mathlib(&root));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn incidental_mentions_of_mathlib_do_not_count() {
+        let root = tmp("lakefile_incidental");
+        fs::write(
+            root.join("lake-manifest.json"),
+            br#"{"version": "1.1.0", "name": "withmathlib", "packages": []}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("lakefile.toml"),
+            b"name = \"withmathlib\"\n# not using mathlib yet\nweak.linter.mathlibStandardSet = true\n",
+        )
+        .unwrap();
         assert!(!requires_mathlib(&root));
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn lean_lakefile_forms_are_recognized() {
+        assert!(lakefile_mentions_mathlib(
+            "require \"leanprover-community\" / \"mathlib\" @ git \"v4.9.0\""
+        ));
+        assert!(lakefile_mentions_mathlib(
+            "require mathlib from \"../mathlib4\""
+        ));
+        assert!(lakefile_mentions_mathlib(
+            "package mathlib where\n  leanOptions := #[]"
+        ));
+        assert!(!lakefile_mentions_mathlib("package Demo where"));
     }
 
     #[test]

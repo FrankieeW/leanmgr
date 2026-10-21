@@ -1,14 +1,31 @@
 //! End-to-end tests that drive the `leanmgr` binary against a sandboxed
 //! config directory. Nothing here touches the real user config or runs
-//! `lake`.
+//! `lake`, and Git is isolated from the caller's repository and settings.
 
 use leanmgr::config::Config;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// Variables through which a parent Git process (a hook, `git rebase
+/// --exec`, a wrapper script) would point child `git` commands at its own
+/// repository or configuration.
+const INHERITED_GIT_VARS: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_PREFIX",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+];
 
 /// A temporary directory holding a private config dir plus project trees.
 struct Sandbox {
@@ -30,23 +47,59 @@ impl Sandbox {
             .as_nanos();
         let root = std::env::temp_dir().join(format!("leanmgr-it-{name}-{nonce}"));
         fs::create_dir_all(root.join("config")).unwrap();
+        fs::write(root.join("gitconfig"), b"").unwrap();
         Self {
             root,
             runs: AtomicUsize::new(0),
         }
     }
 
+    /// A command that sees only the sandbox: its config dir, an empty Git
+    /// configuration, and no repository above the sandbox root.
+    fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
+        let mut command = Command::new(program);
+        for var in INHERITED_GIT_VARS {
+            command.env_remove(var);
+        }
+        command
+            .env("XDG_CONFIG_HOME", self.root.join("config"))
+            .env("APPDATA", self.root.join("config"))
+            .env("GIT_CONFIG_GLOBAL", self.root.join("gitconfig"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CEILING_DIRECTORIES", &self.root)
+            .current_dir(&self.root);
+        command
+    }
+
+    /// Run sandboxed `git` in `dir`.
+    fn git(&self, dir: &Path, args: &[&str]) -> std::io::Result<Output> {
+        self.command("git")
+            .args([
+                "-c",
+                "user.name=leanmgr",
+                "-c",
+                "user.email=leanmgr@example.com",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .output()
+    }
+
     /// Run `leanmgr` with `stdin`, failing the test if it does not exit
     /// within 30 seconds (guards against interactive loops that never end).
     fn run(&self, args: &[&str], stdin: &str) -> Run {
+        self.run_bin(env!("CARGO_BIN_EXE_leanmgr"), args, stdin)
+    }
+
+    fn run_bin(&self, binary: &str, args: &[&str], stdin: &str) -> Run {
         let run = self.runs.fetch_add(1, Ordering::SeqCst);
         let out_path = self.root.join(format!("stdout-{run}"));
         let err_path = self.root.join(format!("stderr-{run}"));
-        let mut child = Command::new(env!("CARGO_BIN_EXE_leanmgr"))
+        let mut child = self
+            .command(binary)
             .args(args)
-            .env("XDG_CONFIG_HOME", self.root.join("config"))
-            .env("APPDATA", self.root.join("config"))
-            .current_dir(&self.root)
             .stdin(Stdio::piped())
             .stdout(File::create(&out_path).unwrap())
             .stderr(File::create(&err_path).unwrap())
@@ -309,10 +362,10 @@ fn toolchain_list_does_not_count_missing_paths_as_toolchains() {
 
 #[test]
 fn worktree_prune_dry_run_skips_projects_git_cannot_audit() {
-    if Command::new("git").arg("--version").output().is_err() {
+    let sandbox = Sandbox::new("worktree_skips");
+    if sandbox.git(&sandbox.root, &["--version"]).is_err() {
         return;
     }
-    let sandbox = Sandbox::new("worktree_skips");
     let plain = sandbox.project("plain", 16, true);
     let gone = sandbox.missing("gone");
     sandbox.write_config(&[("plain", &plain), ("gone", &gone)]);
@@ -324,39 +377,34 @@ fn worktree_prune_dry_run_skips_projects_git_cannot_audit() {
     assert!(run.stdout.contains("Skipped (not a git repository): plain"));
 }
 
-#[test]
-fn worktree_prune_dry_run_shows_what_git_would_prune() {
-    let git = |dir: &Path, args: &[&str]| {
-        Command::new("git")
-            .args([
-                "-c",
-                "user.name=leanmgr",
-                "-c",
-                "user.email=leanmgr@example.com",
-            ])
-            .args(args)
-            .current_dir(dir)
-            .output()
-    };
-    let sandbox = Sandbox::new("worktree_stale");
-    if git(&sandbox.root, &["init", "-q", "repo"]).is_err() {
-        return;
-    }
+/// Create `repo` with one commit and a linked worktree `wt` whose
+/// directory has been deleted, leaving a stale worktree record. Returns
+/// `None` when git is unavailable.
+fn repo_with_stale_worktree(sandbox: &Sandbox) -> Option<PathBuf> {
+    sandbox.git(&sandbox.root, &["init", "-q", "repo"]).ok()?;
     let repo = sandbox.root.join("repo");
-    assert!(
-        git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"])
-            .unwrap()
-            .status
-            .success()
-    );
-    assert!(
-        git(&repo, &["worktree", "add", "-q", "../wt"])
-            .unwrap()
-            .status
-            .success()
-    );
+    for args in [
+        &["commit", "-q", "--allow-empty", "-m", "init"][..],
+        &["worktree", "add", "-q", "../wt"][..],
+    ] {
+        let output = sandbox.git(&repo, args).unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     fs::remove_dir_all(sandbox.root.join("wt")).unwrap();
     sandbox.write_config(&[("repo", &repo)]);
+    Some(repo)
+}
+
+#[test]
+fn worktree_prune_dry_run_shows_what_git_would_prune() {
+    let sandbox = Sandbox::new("worktree_stale");
+    if repo_with_stale_worktree(&sandbox).is_none() {
+        return;
+    }
 
     let preview = sandbox.run(&["worktree", "prune", "--dry-run"], "");
     assert!(preview.status.success(), "stderr: {}", preview.stderr);
@@ -371,6 +419,33 @@ fn worktree_prune_dry_run_shows_what_git_would_prune() {
 }
 
 #[test]
+fn worktree_prune_asks_first_and_reports_what_it_pruned() {
+    let sandbox = Sandbox::new("worktree_prune_confirm");
+    if repo_with_stale_worktree(&sandbox).is_none() {
+        return;
+    }
+
+    let declined = sandbox.run(&["worktree", "prune"], "n\n");
+    assert!(declined.status.success(), "stderr: {}", declined.stderr);
+    let prompt_at = declined.stdout.find("[y/N]").expect("confirmation prompt");
+    let preview_at = declined.stdout.find("worktrees/wt").expect("preview line");
+    assert!(preview_at < prompt_at, "preview must precede the prompt");
+    assert!(declined.stdout.contains("Aborted."));
+    let still_broken = sandbox.run(&["worktree", "doctor"], "");
+    assert!(still_broken.stdout.contains("Broken worktrees: 1"));
+
+    let forced = sandbox.run(&["worktree", "prune", "--force"], "");
+    assert!(forced.status.success(), "stderr: {}", forced.stderr);
+    assert!(
+        forced.stdout.contains("worktrees/wt"),
+        "the real prune reports what it removed:\n{}",
+        forced.stdout
+    );
+    let fixed = sandbox.run(&["worktree", "doctor"], "");
+    assert!(fixed.stdout.contains("Broken worktrees: 0"));
+}
+
+#[test]
 fn completions_are_generated_for_every_shell() {
     let sandbox = Sandbox::new("completions");
     for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
@@ -381,6 +456,51 @@ fn completions_are_generated_for_every_shell() {
             "{shell} script names the binary"
         );
     }
+}
+
+#[test]
+fn lm_generates_completions_for_lm() {
+    let sandbox = Sandbox::new("completions_lm");
+    let run = sandbox.run_bin(env!("CARGO_BIN_EXE_lm"), &["completions", "bash"], "");
+    assert!(run.status.success(), "stderr: {}", run.stderr);
+    assert!(
+        run.stdout.contains("_lm()"),
+        "bash function for lm:\n{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn gc_json_never_prompts_and_reports_whether_it_executed() {
+    let sandbox = Sandbox::new("gc_json");
+    let project = sandbox.project("old", 1024, true);
+    sandbox.write_config(&[("old", &project)]);
+
+    let planned = sandbox.run(&["gc", "--unused-days", "0", "--json"], "");
+    assert!(planned.status.success(), "stderr: {}", planned.stderr);
+    let report: serde_json::Value =
+        serde_json::from_str(&planned.stdout).expect("stdout is pure JSON (no prompt)");
+    assert_eq!(report["executed"], false);
+    assert_eq!(report["mode"]["unused_days"], 0);
+    assert_eq!(report["targets"].as_array().unwrap().len(), 1);
+    assert!(project.join(".lake").exists());
+
+    let forced = sandbox.run(&["gc", "--unused-days", "0", "--json", "--force"], "");
+    let report: serde_json::Value = serde_json::from_str(&forced.stdout).unwrap();
+    assert_eq!(report["executed"], true);
+    assert!(!project.join(".lake").exists());
+}
+
+#[test]
+fn restoring_a_named_project_whose_path_is_gone_fails() {
+    let sandbox = Sandbox::new("restore_missing_named");
+    let gone = sandbox.missing("gone");
+    sandbox.write_config(&[("gone", &gone)]);
+
+    let run = sandbox.run(&["restore", "gone"], "");
+
+    assert!(!run.status.success());
+    assert!(run.stderr.contains("cannot restore gone"));
 }
 
 #[test]

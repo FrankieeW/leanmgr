@@ -79,6 +79,41 @@ impl Project {
     pub fn has_tag(&self, tag: &str) -> bool {
         self.tags.iter().any(|item| item == tag)
     }
+
+    /// Whether the project directory is present, gone, or cannot be checked.
+    ///
+    /// `Path::exists` reports `false` on permission errors too, which would
+    /// make an unreadable project look deleted; only a definite "not found"
+    /// counts as missing.
+    pub fn path_state(&self) -> PathState {
+        match self.expanded_path().try_exists() {
+            Ok(true) => PathState::Present,
+            Ok(false) => PathState::Missing,
+            Err(_) => PathState::Unreadable,
+        }
+    }
+}
+
+/// Result of checking a project's path on disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathState {
+    /// The path exists.
+    Present,
+    /// The path definitely does not exist.
+    Missing,
+    /// The path could not be checked, e.g. a parent denies access.
+    Unreadable,
+}
+
+impl PathState {
+    /// Label used in the `list` STATUS column.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Present => "ok",
+            Self::Missing => "missing",
+            Self::Unreadable => "unreadable",
+        }
+    }
 }
 
 /// Add a project to the config.
@@ -207,7 +242,7 @@ fn remove_missing_projects(dry_run: bool, force: bool) -> Result<()> {
 fn missing_entries(projects: &[Project]) -> Vec<(String, String)> {
     projects
         .iter()
-        .filter(|project| !project.expanded_path().exists())
+        .filter(|project| project.path_state() == PathState::Missing)
         .map(|project| (project.name.clone(), project.path.clone()))
         .collect()
 }
@@ -234,7 +269,10 @@ pub fn list_projects(args: ListArgs) -> Result<()> {
         &["NAME", "STATUS", "SIZE", "MEASURED", "TAGS", "PATH"],
         &rows,
     );
-    let missing = rows.iter().filter(|row| row[1] == STATUS_MISSING).count();
+    let missing = rows
+        .iter()
+        .filter(|row| row[1] == PathState::Missing.label())
+        .count();
     if missing > 0 {
         println!(
             "{missing} project path(s) no longer exist; `leanmgr remove --missing` drops them from the index."
@@ -243,18 +281,11 @@ pub fn list_projects(args: ListArgs) -> Result<()> {
     Ok(())
 }
 
-const STATUS_MISSING: &str = "missing";
-
 fn list_row(project: &Project, now: u64) -> Vec<String> {
-    let status = if project.expanded_path().exists() {
-        "ok"
-    } else {
-        STATUS_MISSING
-    };
     let (size, measured) = cached_size_cells(project, now);
     vec![
         project.name.clone(),
-        status.to_string(),
+        project.path_state().label().to_string(),
         size,
         measured,
         project.tags.join(","),
@@ -397,7 +428,7 @@ mod tests {
             row,
             vec![
                 "demo".to_string(),
-                STATUS_MISSING.to_string(),
+                PathState::Missing.label().to_string(),
                 "unknown".to_string(),
                 "never".to_string(),
                 "a,b".to_string(),
@@ -424,6 +455,32 @@ mod tests {
                 "/nonexistent/leanmgr-missing-entry".to_string()
             )]
         );
+    }
+
+    /// A project under a directory that denies access is not "missing":
+    /// `remove --missing` must never drop it.
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_paths_are_not_missing() {
+        use std::os::unix::fs::PermissionsExt;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let locked = std::env::temp_dir().join(format!("leanmgr-unreadable-{nonce}"));
+        std::fs::create_dir_all(locked.join("child")).unwrap();
+        let mut project = project_with_cache(None);
+        project.path = locked.join("child").display().to_string();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let state = project.path_state();
+        let missing = missing_entries(std::slice::from_ref(&project));
+
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_dir_all(&locked).unwrap();
+        // Root ignores permission bits and sees the directory as present.
+        assert!(matches!(state, PathState::Unreadable | PathState::Present));
+        assert!(missing.is_empty());
     }
 
     fn project_with_cache(size_cache: Option<SizeCache>) -> Project {

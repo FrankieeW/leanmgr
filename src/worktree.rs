@@ -48,7 +48,7 @@ const NOT_A_REPOSITORY: &str = "not a git repository";
 /// List worktrees for indexed projects.
 pub fn list_worktrees(args: WorktreeArgs) -> Result<()> {
     let config = load_config()?;
-    let (infos, skipped) = collect_worktrees(&config.projects, &mut run_git);
+    let (infos, skipped) = collect_worktrees(&config.projects, &mut run_git)?;
     if args.json {
         return print_json(&infos);
     }
@@ -71,7 +71,7 @@ pub fn list_worktrees(args: WorktreeArgs) -> Result<()> {
 /// Report broken/prunable worktrees.
 pub fn doctor_worktrees(args: WorktreeArgs) -> Result<()> {
     let config = load_config()?;
-    let (infos, skipped) = collect_worktrees(&config.projects, &mut run_git);
+    let (infos, skipped) = collect_worktrees(&config.projects, &mut run_git)?;
     let broken: Vec<WorktreeInfo> = infos.into_iter().filter(|info| info.prunable).collect();
     if args.json {
         return print_json(&broken);
@@ -88,11 +88,12 @@ pub fn doctor_worktrees(args: WorktreeArgs) -> Result<()> {
 /// to `git worktree prune`.
 ///
 /// Without `--force`, Git's own dry run is shown first and confirmation is
-/// requested only when there is something to prune.
+/// requested only when there is something to prune. The real prune runs
+/// with `--verbose`, so what was removed is always printed.
 pub fn prune_worktrees(args: WorktreePruneArgs) -> Result<()> {
     let config = load_config()?;
     let mut git = run_git;
-    let (repos, skipped) = repositories(&config.projects, &mut git);
+    let (repos, skipped) = repositories(&config.projects, &mut git)?;
 
     if args.dry_run || !args.force {
         let preview = prune_repositories(&repos, true, &mut git);
@@ -101,7 +102,7 @@ pub fn prune_worktrees(args: WorktreePruneArgs) -> Result<()> {
         if args.dry_run {
             return preview.into_result();
         }
-        if preview.dry_run_lines.is_empty() {
+        if preview.lines.is_empty() {
             println!("Nothing to prune.");
             return preview.into_result();
         }
@@ -121,7 +122,8 @@ pub fn prune_worktrees(args: WorktreePruneArgs) -> Result<()> {
 
 #[derive(Debug, Default)]
 struct PruneReport {
-    dry_run_lines: Vec<(String, String)>,
+    /// What Git reported pruning (or would prune, in a dry run).
+    lines: Vec<(String, String)>,
     failures: Vec<(String, String)>,
 }
 
@@ -142,8 +144,9 @@ impl PruneReport {
 /// Projects that share a repository (a nested Lake package, or several
 /// worktrees of one repo) are audited once, so the same worktree is not
 /// listed or pruned repeatedly. Missing paths and directories outside Git
-/// are reported as skipped instead of failing the whole command.
-fn repositories<F>(projects: &[Project], git: &mut F) -> (Vec<Repository>, Vec<Skipped>)
+/// are reported as skipped instead of failing the whole command; failing
+/// to run `git` at all is an error.
+fn repositories<F>(projects: &[Project], git: &mut F) -> Result<(Vec<Repository>, Vec<Skipped>)>
 where
     F: FnMut(&Path, &[&str]) -> Result<Output>,
 {
@@ -159,7 +162,7 @@ where
             });
             continue;
         }
-        let Some(common_dir) = git_common_dir(&dir, git) else {
+        let Some(common_dir) = git_common_dir(&dir, git)? else {
             skipped.push(Skipped {
                 project: project.name.clone(),
                 reason: NOT_A_REPOSITORY,
@@ -173,27 +176,28 @@ where
             });
         }
     }
-    (repos, skipped)
+    Ok((repos, skipped))
 }
 
 /// Return the canonical common Git directory of `dir` — the same for every
 /// worktree of a repository — or `None` when `dir` is not inside Git.
-fn git_common_dir<F>(dir: &Path, git: &mut F) -> Option<PathBuf>
+/// An error means `git` itself could not be run.
+fn git_common_dir<F>(dir: &Path, git: &mut F) -> Result<Option<PathBuf>>
 where
     F: FnMut(&Path, &[&str]) -> Result<Output>,
 {
-    let output = git(dir, &["rev-parse", "--git-common-dir"]).ok()?;
+    let output = git(dir, &["rev-parse", "--git-common-dir"])?;
     if !output.status.success() {
-        return None;
+        return Ok(None);
     }
     let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if raw.is_empty() {
-        return None;
+        return Ok(None);
     }
     // From a subdirectory Git prints a path relative to `dir`; `join` keeps
     // absolute paths unchanged.
     let path = dir.join(raw);
-    Some(path.canonicalize().unwrap_or(path))
+    Ok(Some(path.canonicalize().unwrap_or(path)))
 }
 
 fn prune_repositories<F>(repos: &[Repository], dry_run: bool, git: &mut F) -> PruneReport
@@ -203,24 +207,20 @@ where
     let args: &[&str] = if dry_run {
         &["worktree", "prune", "--dry-run", "--verbose"]
     } else {
-        &["worktree", "prune"]
+        &["worktree", "prune", "--verbose"]
     };
     let mut report = PruneReport::default();
     for repo in repos {
         match git(&repo.dir, args) {
             Ok(output) if output.status.success() => {
-                if dry_run {
-                    // `git worktree prune --verbose` reports on stderr.
-                    let text = format!(
-                        "{}{}",
-                        String::from_utf8_lossy(&output.stderr),
-                        String::from_utf8_lossy(&output.stdout)
-                    );
-                    for line in text.lines().filter(|line| !line.trim().is_empty()) {
-                        report
-                            .dry_run_lines
-                            .push((repo.project.clone(), line.to_string()));
-                    }
+                // `git worktree prune --verbose` reports on stderr.
+                let text = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stderr),
+                    String::from_utf8_lossy(&output.stdout)
+                );
+                for line in text.lines().filter(|line| !line.trim().is_empty()) {
+                    report.lines.push((repo.project.clone(), line.to_string()));
                 }
             }
             Ok(output) => {
@@ -240,7 +240,7 @@ fn run_git(dir: &Path, args: &[&str]) -> Result<Output> {
 }
 
 fn print_prune_report(report: &PruneReport) {
-    for (project, line) in &report.dry_run_lines {
+    for (project, line) in &report.lines {
         println!("{project}  {line}");
     }
     for (project, error) in &report.failures {
@@ -262,23 +262,24 @@ fn print_skipped(skipped: &[Skipped]) {
     }
 }
 
-fn collect_worktrees<F>(projects: &[Project], git: &mut F) -> (Vec<WorktreeInfo>, Vec<Skipped>)
+fn collect_worktrees<F>(
+    projects: &[Project],
+    git: &mut F,
+) -> Result<(Vec<WorktreeInfo>, Vec<Skipped>)>
 where
     F: FnMut(&Path, &[&str]) -> Result<Output>,
 {
-    let (repos, skipped) = repositories(projects, git);
+    let (repos, skipped) = repositories(projects, git)?;
     let mut infos = Vec::new();
     for repo in repos {
-        let Ok(output) = git(&repo.dir, &["worktree", "list", "--porcelain"]) else {
-            continue;
-        };
+        let output = git(&repo.dir, &["worktree", "list", "--porcelain"])?;
         if !output.status.success() {
             continue;
         }
         let text = String::from_utf8_lossy(&output.stdout);
         infos.extend(parse_worktrees(&repo.project, &text));
     }
-    (infos, skipped)
+    Ok((infos, skipped))
 }
 
 /// Parse `git worktree list --porcelain` output.
@@ -367,7 +368,7 @@ prunable gitdir file points to non-existent location
             }
         };
 
-        let (repos, skipped) = repositories(&projects, &mut git);
+        let (repos, skipped) = repositories(&projects, &mut git).unwrap();
 
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].project, "main");
@@ -394,7 +395,9 @@ prunable gitdir file points to non-existent location
         fs::create_dir_all(root.join("repo/sub")).unwrap();
         let mut git = |_dir: &Path, _args: &[&str]| Ok(output(0, "../.git\n", ""));
 
-        let common = git_common_dir(&root.join("repo/sub"), &mut git).unwrap();
+        let common = git_common_dir(&root.join("repo/sub"), &mut git)
+            .unwrap()
+            .unwrap();
 
         assert_eq!(common, root.join("repo/.git").canonicalize().unwrap());
         fs::remove_dir_all(&root).unwrap();
@@ -428,7 +431,7 @@ prunable gitdir file points to non-existent location
         let report = prune_repositories(&repos, true, &mut git);
 
         assert_eq!(
-            report.dry_run_lines,
+            report.lines,
             vec![(
                 "ok".to_string(),
                 "Removing worktrees/stale: gitdir file points to non-existent location".to_string()
@@ -442,18 +445,40 @@ prunable gitdir file points to non-existent location
     }
 
     #[test]
-    fn real_prune_does_not_collect_dry_run_lines() {
+    fn real_prune_is_verbose_and_reports_what_it_removed() {
         let repos = vec![Repository {
             project: "ok".to_string(),
             dir: PathBuf::from("/tmp/ok"),
         }];
         let mut git = |_dir: &Path, args: &[&str]| {
-            assert_eq!(args, ["worktree", "prune"]);
-            Ok(output(0, "", ""))
+            assert_eq!(args, ["worktree", "prune", "--verbose"]);
+            Ok(output(
+                0,
+                "",
+                "Removing worktrees/stale: gitdir file points to non-existent location\n",
+            ))
         };
         let report = prune_repositories(&repos, false, &mut git);
-        assert!(report.dry_run_lines.is_empty());
+        assert_eq!(report.lines.len(), 1);
+        assert!(report.lines[0].1.contains("worktrees/stale"));
         assert!(report.into_result().is_ok());
+    }
+
+    #[test]
+    fn failing_to_run_git_is_an_error_not_a_skip() {
+        // With git missing from PATH every project used to be reported as
+        // "not a git repository" and the command exited 0.
+        let root = tmp("git_missing");
+        fs::create_dir_all(root.join("repo")).unwrap();
+        let projects = vec![project("repo", &root.join("repo"))];
+        let mut git = |_dir: &Path, _args: &[&str]| -> Result<Output> {
+            Err(anyhow::anyhow!("failed to run git"))
+        };
+
+        let error = repositories(&projects, &mut git).unwrap_err();
+
+        assert!(error.to_string().contains("failed to run git"));
+        fs::remove_dir_all(&root).unwrap();
     }
 
     fn tmp(name: &str) -> PathBuf {

@@ -16,6 +16,7 @@ use crate::doctor::DoctorReport;
 use crate::gc::{GcMode, GcOptions, plan_gc};
 use crate::output::format_bytes;
 use crate::project::Project;
+use crate::restore::{RestoreStep, plan_restore};
 use anyhow::{Context, Result, bail};
 use std::io::{BufRead, Write};
 
@@ -171,11 +172,22 @@ pub(super) fn print_restore_command<R: BufRead, W: Write>(
 ) -> Result<()> {
     let project = choose_project(projects, input, output)?;
     print_section_to(output, "Restore command")?;
-    writeln!(
-        output,
-        "Run this when you want Lake to restore cache artifacts:"
-    )?;
-    writeln!(output, "leanmgr restore {}", shell_arg(&project.name))?;
+    match plan_restore(project) {
+        RestoreStep::CacheGet => {
+            writeln!(
+                output,
+                "Run this when you want Lake to restore cache artifacts:"
+            )?;
+            writeln!(output, "leanmgr restore {}", shell_arg(&project.name))?;
+        }
+        RestoreStep::Skip(reason) => {
+            writeln!(
+                output,
+                "leanmgr restore would skip {}: {reason}.",
+                project.name
+            )?;
+        }
+    }
     Ok(())
 }
 
