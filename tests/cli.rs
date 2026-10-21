@@ -639,3 +639,117 @@ fn gc_budget_and_age_filter_combine() {
     let neither = sandbox.run(&["gc"], "");
     assert!(!neither.status.success());
 }
+
+#[test]
+fn size_all_is_rejected_next_to_a_filter_instead_of_being_ignored() {
+    let sandbox = Sandbox::new("size_all_conflict");
+    let project = sandbox.project("demo", 16, true);
+    sandbox.write_config(&[("demo", &project)]);
+
+    // `--all` used to be accepted and then ignored, so `--all --tag x`
+    // silently reported the tag-filtered set.
+    let run = sandbox.run(&["size", "--all", "--tag", "demo"], "");
+
+    assert!(!run.status.success(), "stdout: {}", run.stdout);
+    assert!(
+        run.stderr.contains("cannot be used with"),
+        "stderr: {}",
+        run.stderr
+    );
+
+    // `--all` on its own is the explicit "no filter" form.
+    let run = sandbox.run(&["size", "--all"], "");
+    assert!(run.status.success(), "stderr: {}", run.stderr);
+    assert!(run.stdout.contains("demo"));
+}
+
+#[test]
+fn scan_finds_projects_inside_a_directory_named_like_a_build_folder() {
+    let sandbox = Sandbox::new("scan_root_not_pruned");
+    let target = sandbox.root.join("target");
+    fs::create_dir_all(target.join("inner")).unwrap();
+    fs::write(target.join("inner/lakefile.toml"), b"name = \"inner\"\n").unwrap();
+
+    let run = sandbox.run(&["scan", &target.display().to_string(), "--json"], "");
+
+    assert!(run.status.success(), "stderr: {}", run.stderr);
+    assert!(
+        run.stdout.contains("inner"),
+        "scan must not prune the root it was given: {}",
+        run.stdout
+    );
+}
+
+#[test]
+fn gc_target_accepts_scientific_notation_and_reports_real_overflow() {
+    let sandbox = Sandbox::new("gc_scientific_target");
+    let project = sandbox.project("demo", 4096, true);
+    sandbox.write_config(&[("demo", &project)]);
+
+    // `1e3` used to be rejected as an unknown unit "e20"-style, because the
+    // split happened at the first alphabetic character.
+    let run = sandbox.run(&["gc", "--target", "1e3", "--dry-run"], "");
+    assert!(run.status.success(), "stderr: {}", run.stderr);
+
+    // A genuinely oversized value still has to be refused, and it has to say
+    // why.
+    let run = sandbox.run(&["gc", "--target", "1e20", "--dry-run"], "");
+    assert!(!run.status.success());
+    assert!(
+        run.stderr.contains("exceeds u64::MAX"),
+        "stderr: {}",
+        run.stderr
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_path_selects_the_indexed_project() {
+    let sandbox = Sandbox::new("symlink_selector");
+    let project = sandbox.project("demo", 16, true);
+    fs::create_dir_all(project.join(".lake/build")).unwrap();
+    fs::write(project.join(".lake/build/blob"), vec![b'x'; 32]).unwrap();
+    let link = sandbox.root.join("link-to-demo");
+    std::os::unix::fs::symlink(&project, &link).unwrap();
+    sandbox.write_config(&[("demo", &project)]);
+
+    let run = sandbox.run(
+        &[
+            "clean",
+            &link.display().to_string(),
+            "--level",
+            "soft",
+            "--dry-run",
+        ],
+        "",
+    );
+
+    assert!(run.status.success(), "stderr: {}", run.stderr);
+    assert!(
+        run.stdout.contains("demo"),
+        "a symlink to an indexed project must select it: {}",
+        run.stdout
+    );
+}
+
+#[test]
+fn interact_gc_suggestion_keeps_the_tag_scope_it_previewed() {
+    let sandbox = Sandbox::new("interact_tag_scope");
+    let inside = sandbox.project("inside", 16, true);
+    let outside = sandbox.project("outside", 16, true);
+    sandbox.write_config(&[("inside", &inside), ("outside", &outside)]);
+
+    // Tag only one of the two projects, then ask the assistant for the gc
+    // dry-run.
+    let run = sandbox.run(&["tag", "add", "inside", "scoped"], "");
+    assert!(run.status.success(), "stderr: {}", run.stderr);
+
+    let run = sandbox.run(&["interact", "--tag", "scoped"], "3\n\nq\n");
+
+    assert!(run.status.success(), "stderr: {}", run.stderr);
+    assert!(
+        run.stdout.contains("--tag scoped"),
+        "the suggested gc command must keep the scope it previewed: {}",
+        run.stdout
+    );
+}
