@@ -106,15 +106,18 @@ pub fn parse_bytes(input: &str) -> Result<u64> {
     if trimmed.is_empty() {
         anyhow::bail!("empty size: {input:?}");
     }
-    let split = trimmed
-        .find(|c: char| c.is_ascii_alphabetic())
-        .unwrap_or(trimmed.len());
+    let split = split_number_and_unit(trimmed);
     let (number, unit) = trimmed.split_at(split);
     let number = number.trim();
-    // Pure integers (no `.`, `e`, `E`) parse strictly as u64 so overflow is
-    // caught. Decimals fall back to f64, which is exact for small values and
-    // checked against u64::MAX below.
-    let value: f64 = if number.contains('.') || number.contains('e') || number.contains('E') {
+    // Pure integers (no `.`, `e`, `E`, sign) parse strictly as u64 so
+    // overflow is caught. Everything else falls back to f64, which is exact
+    // for small values and checked against u64::MAX below.
+    let value: f64 = if number.contains('.')
+        || number.contains('e')
+        || number.contains('E')
+        || number.starts_with('-')
+        || number.starts_with('+')
+    {
         number
             .parse()
             .with_context(|| format!("invalid size number in {input:?}"))?
@@ -145,6 +148,44 @@ pub fn parse_bytes(input: &str) -> Result<u64> {
     Ok(product as u64)
 }
 
+/// Return the byte offset where the unit part of a size string starts.
+///
+/// The number part may contain digits, a decimal point, a sign, and a
+/// scientific-notation exponent (`1.5e3`). The exponent marker is an `e`,
+/// so the split cannot simply be "first alphabetic character" — that would
+/// cut `1e20` into `1` and `e20` and reject the input as an unknown unit.
+fn split_number_and_unit(input: &str) -> usize {
+    let bytes = input.as_bytes();
+    let mut index = 0;
+
+    // Optional leading sign.
+    if index < bytes.len() && (bytes[index] == b'+' || bytes[index] == b'-') {
+        index += 1;
+    }
+
+    // Digits and a decimal point.
+    while index < bytes.len() && (bytes[index].is_ascii_digit() || bytes[index] == b'.') {
+        index += 1;
+    }
+
+    // Optional exponent: `e` or `E`, optional sign, at least one digit.
+    if index < bytes.len() && (bytes[index] == b'e' || bytes[index] == b'E') {
+        let mut cursor = index + 1;
+        if cursor < bytes.len() && (bytes[cursor] == b'+' || bytes[cursor] == b'-') {
+            cursor += 1;
+        }
+        let digits_start = cursor;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+            cursor += 1;
+        }
+        if cursor > digits_start {
+            index = cursor;
+        }
+    }
+
+    index
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +198,26 @@ mod tests {
         assert_eq!(parse_bytes("2GB").unwrap(), 2 * 1024 * 1024 * 1024);
         assert!(parse_bytes("abc").is_err());
         assert!(parse_bytes("").is_err());
+    }
+
+    /// Scientific notation belongs to the number, not the unit. Splitting on
+    /// the first alphabetic character used to cut `1e20` into `1` + `e20`
+    /// and reject it as an unknown unit.
+    #[test]
+    fn parse_bytes_accepts_scientific_notation() {
+        assert_eq!(parse_bytes("1e3").unwrap(), 1000);
+        assert_eq!(parse_bytes("1.5e3").unwrap(), 1500);
+        assert_eq!(parse_bytes("2e2KiB").unwrap(), 200 * 1024);
+        assert_eq!(parse_bytes("1E3").unwrap(), 1000);
+    }
+
+    #[test]
+    fn parse_bytes_rejects_negative_and_malformed() {
+        assert!(parse_bytes("-5").is_err());
+        assert!(parse_bytes("-1GiB").is_err());
+        assert!(parse_bytes("1e").is_err());
+        assert!(parse_bytes("1ex").is_err());
+        assert!(parse_bytes("KB").is_err());
     }
 
     #[test]
