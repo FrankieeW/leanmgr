@@ -4,7 +4,7 @@ use crate::cli::{CleanArgs, CleanLevel};
 use crate::output::{format_bytes, print_table};
 use crate::project::{Project, select_projects};
 use crate::prompt::confirm;
-use crate::size::dir_size;
+use crate::size::{LakeScan, scan_lake};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use std::fs;
@@ -60,38 +60,53 @@ pub fn execute_targets(targets: &[CleanTarget], quiet: bool) -> Result<()> {
 pub fn build_clean_plan(projects: &[Project], level: CleanLevel) -> Result<Vec<CleanTarget>> {
     let mut targets = Vec::new();
     for project in projects {
-        let root = project.expanded_path();
-        let lake = root.join(".lake");
-        match level {
-            CleanLevel::Soft => push_existing(project, &lake, lake.join("build"), &mut targets)?,
-            CleanLevel::DepsBuild => {
-                let packages = lake.join("packages");
-                if packages.exists() {
-                    for entry in fs::read_dir(&packages)
-                        .with_context(|| format!("failed to read {}", packages.display()))?
-                    {
-                        let entry = entry?;
-                        if entry.file_type()?.is_dir() {
-                            push_existing(
-                                project,
-                                &lake,
-                                entry.path().join(".lake").join("build"),
-                                &mut targets,
-                            )?;
-                        }
-                    }
-                }
-            }
-            CleanLevel::Hard => push_existing(project, &lake, lake.clone(), &mut targets)?,
-        }
+        let scan = scan_lake(project);
+        plan_from_scan(project, &scan, level, &mut targets)?;
     }
     Ok(targets)
+}
+
+/// Build cleanup targets from an already-computed scan.
+///
+/// Callers that have already walked the `.lake` tree (see `gc::plan_gc`)
+/// use this to avoid a second traversal of the same cache.
+pub fn build_clean_plan_from_scan(
+    project: &Project,
+    scan: &LakeScan,
+    level: CleanLevel,
+) -> Result<Vec<CleanTarget>> {
+    let mut targets = Vec::new();
+    plan_from_scan(project, scan, level, &mut targets)?;
+    Ok(targets)
+}
+
+fn plan_from_scan(
+    project: &Project,
+    scan: &LakeScan,
+    level: CleanLevel,
+    targets: &mut Vec<CleanTarget>,
+) -> Result<()> {
+    let root = project.expanded_path();
+    let lake = root.join(".lake");
+    match level {
+        CleanLevel::Soft => {
+            push_existing(project, &lake, lake.join("build"), scan.size.build, targets)?
+        }
+        CleanLevel::DepsBuild => {
+            for (build_path, bytes) in &scan.package_builds {
+                push_existing(project, &lake, build_path.clone(), *bytes, targets)?;
+            }
+        }
+        CleanLevel::Hard => push_existing(project, &lake, lake.clone(), scan.size.lake, targets)?,
+    }
+    Ok(())
 }
 
 fn push_existing(
     project: &Project,
     lake: &Path,
     target: PathBuf,
+    bytes: u64,
     targets: &mut Vec<CleanTarget>,
 ) -> Result<()> {
     if !target.exists() {
@@ -100,7 +115,7 @@ fn push_existing(
     validate_lake_containment(lake, &target)?;
     targets.push(CleanTarget {
         project: project.name.clone(),
-        bytes: dir_size(&target)?,
+        bytes,
         path: target,
     });
     Ok(())

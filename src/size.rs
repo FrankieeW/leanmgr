@@ -6,8 +6,9 @@ use crate::output::{format_bytes, print_json, print_table};
 use crate::project::{Project, filter_by_tag, matches_project};
 use anyhow::{Result, bail};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 use walkdir::{DirEntry, WalkDir};
@@ -31,6 +32,19 @@ pub struct ProjectSize {
     pub latest_modified: Option<SystemTime>,
 }
 
+/// Bucketed view of one project's `.lake` tree, from a single traversal.
+///
+/// `size` answers "how big" and "when was it last touched" together, so a
+/// command that needs both does not have to walk the cache twice.
+#[derive(Clone, Debug, Default)]
+pub struct LakeScan {
+    /// Size buckets for the project.
+    pub size: ProjectSize,
+    /// `.lake/packages/<pkg>/.lake/build` paths that exist, with the bytes
+    /// under each. Targets for the `deps-build` cleanup level.
+    pub package_builds: Vec<(PathBuf, u64)>,
+}
+
 /// Multi-project size report.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct SizeReport {
@@ -47,6 +61,7 @@ pub fn size_command(args: SizeArgs) -> Result<()> {
         &config.projects,
         args.project.as_deref(),
         args.tag.as_deref(),
+        args.all,
     )?;
 
     let mut report = SizeReport::default();
@@ -86,7 +101,14 @@ fn select_sized<'a>(
     projects: &'a [Project],
     selector: Option<&str>,
     tag: Option<&str>,
+    all: bool,
 ) -> Result<Vec<&'a Project>> {
+    if all {
+        // `--all` is the explicit "no filter" form. Clap rejects it in
+        // combination with a selector or a tag, so it can never silently
+        // lose against one of them.
+        return Ok(projects.iter().collect());
+    }
     let Some(selector) = selector else {
         return Ok(filter_by_tag(projects, tag));
     };
@@ -154,15 +176,42 @@ pub fn measure_projects(projects: &[&Project]) -> Vec<ProjectSize> {
 /// never walk the tree twice. Entries that vanish or cannot be read
 /// mid-walk (a concurrent `lake build`) are skipped.
 pub fn project_size(project: &Project) -> ProjectSize {
+    scan_lake(project).size
+}
+
+/// Traverse a project's `.lake` once, bucketing bytes by subtree, tracking the
+/// newest modification time, and recording the per-package build directories
+/// that the `deps-build` cleanup level targets.
+pub fn scan_lake(project: &Project) -> LakeScan {
     let lake = project.expanded_path().join(".lake");
     let build = lake.join("build");
     let packages = lake.join("packages");
-    let mut size = ProjectSize {
-        project: project.name.clone(),
-        ..ProjectSize::default()
+    let mut scan = LakeScan {
+        size: ProjectSize {
+            project: project.name.clone(),
+            ..ProjectSize::default()
+        },
+        package_builds: Vec::new(),
     };
     if !lake.exists() {
-        return size;
+        return scan;
+    }
+
+    // Seed the per-package map with the build directories that exist, so an
+    // empty one is still a valid cleanup target.
+    let mut package_bytes: BTreeMap<PathBuf, u64> = BTreeMap::new();
+    if let Ok(entries) = std::fs::read_dir(&packages) {
+        for entry in entries.flatten() {
+            // `file_type` does not follow symlinks, so a symlinked package
+            // directory is skipped rather than treated as a cache to delete.
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let build_path = entry.path().join(".lake").join("build");
+            if build_path.exists() {
+                package_bytes.insert(build_path, 0);
+            }
+        }
     }
 
     let entries = WalkDir::new(&lake)
@@ -174,21 +223,39 @@ pub fn project_size(project: &Project) -> ProjectSize {
             continue;
         };
         if let Ok(modified) = metadata.modified() {
-            size.latest_modified = size.latest_modified.max(Some(modified));
+            scan.size.latest_modified = scan.size.latest_modified.max(Some(modified));
         }
         if !entry.file_type().is_file() {
             continue;
         }
         let len = metadata.len();
-        size.lake += len;
+        scan.size.lake += len;
         if entry.path().starts_with(&build) {
-            size.build += len;
+            scan.size.build += len;
         } else if entry.path().starts_with(&packages) {
-            size.packages += len;
+            scan.size.packages += len;
+            if let Some(build_path) = package_build_path(&packages, entry.path()) {
+                *package_bytes.entry(build_path).or_insert(0) += len;
+            }
         }
     }
-    size.total = size.lake;
-    size
+    scan.size.total = scan.size.lake;
+    scan.package_builds = package_bytes.into_iter().collect();
+    scan
+}
+
+/// Return the `<packages>/<pkg>/.lake/build` path a file belongs to, if any.
+fn package_build_path(packages: &Path, file: &Path) -> Option<PathBuf> {
+    let relative = file.strip_prefix(packages).ok()?;
+    let mut components = relative.components();
+    let package = components.next()?;
+    if components.next()?.as_os_str() != ".lake" {
+        return None;
+    }
+    if components.next()?.as_os_str() != "build" {
+        return None;
+    }
+    Some(packages.join(package).join(".lake").join("build"))
 }
 
 /// Return the recursive size of a directory, or zero when missing.
@@ -239,10 +306,12 @@ mod tests {
     #[test]
     fn unknown_size_selector_fails_loudly() {
         let projects = vec![named("demo")];
-        let error = select_sized(&projects, Some("nope"), None).unwrap_err();
+        let error = select_sized(&projects, Some("nope"), None, false).unwrap_err();
         assert!(error.to_string().contains("project not found: nope"));
         assert_eq!(
-            select_sized(&projects, Some("demo"), None).unwrap().len(),
+            select_sized(&projects, Some("demo"), None, false)
+                .unwrap()
+                .len(),
             1
         );
     }
@@ -250,16 +319,94 @@ mod tests {
     #[test]
     fn size_without_selector_uses_tag_filter() {
         let projects = vec![named("demo")];
-        assert_eq!(select_sized(&projects, None, None).unwrap().len(), 1);
+        assert_eq!(select_sized(&projects, None, None, false).unwrap().len(), 1);
         assert_eq!(
-            select_sized(&projects, None, Some("active")).unwrap().len(),
+            select_sized(&projects, None, Some("active"), false)
+                .unwrap()
+                .len(),
             1
         );
         assert!(
-            select_sized(&projects, None, Some("other"))
+            select_sized(&projects, None, Some("other"), false)
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// `--all` is the explicit "no filter" form. It must actually be read,
+    /// and it must not silently lose against a tag filter.
+    #[test]
+    fn size_all_selects_every_project() {
+        let projects = vec![named("demo"), named("other")];
+        assert_eq!(select_sized(&projects, None, None, true).unwrap().len(), 2);
+    }
+
+    /// `scan_lake` must report the per-package build directories that the
+    /// `deps-build` cleanup level targets, in one traversal.
+    #[test]
+    fn scan_lake_reports_package_build_directories() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("leanmgr-scan-{nonce}"));
+        fs::create_dir_all(root.join(".lake/packages/mathlib/.lake/build")).unwrap();
+        fs::create_dir_all(root.join(".lake/packages/batteries/.lake/build")).unwrap();
+        fs::write(root.join(".lake/packages/mathlib/.lake/build/a"), b"aaaa").unwrap();
+        fs::write(root.join(".lake/packages/batteries/.lake/build/b"), b"bb").unwrap();
+
+        let project = Project {
+            name: "demo".to_string(),
+            path: root.display().to_string(),
+            tags: Vec::new(),
+            description: None,
+            added_at: None,
+            last_seen_at: None,
+            last_committed_at: None,
+            size_cache: None,
+        };
+
+        let scan = scan_lake(&project);
+        assert_eq!(scan.size.lake, 6);
+        assert_eq!(scan.size.packages, 6);
+        assert_eq!(scan.package_builds.len(), 2);
+
+        let mathlib = root.join(".lake/packages/mathlib/.lake/build");
+        let batteries = root.join(".lake/packages/batteries/.lake/build");
+        assert!(scan.package_builds.contains(&(mathlib, 4)));
+        assert!(scan.package_builds.contains(&(batteries, 2)));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// An empty package build directory is still a cleanup target.
+    #[test]
+    fn scan_lake_keeps_empty_package_build_directories() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("leanmgr-scan-empty-{nonce}"));
+        fs::create_dir_all(root.join(".lake/packages/empty/.lake/build")).unwrap();
+
+        let project = Project {
+            name: "demo".to_string(),
+            path: root.display().to_string(),
+            tags: Vec::new(),
+            description: None,
+            added_at: None,
+            last_seen_at: None,
+            last_committed_at: None,
+            size_cache: None,
+        };
+
+        let scan = scan_lake(&project);
+        assert_eq!(
+            scan.package_builds,
+            vec![(root.join(".lake/packages/empty/.lake/build"), 0)]
+        );
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]

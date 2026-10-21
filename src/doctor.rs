@@ -243,7 +243,25 @@ pub(crate) fn unused_cutoff(unused_days: u64) -> SystemTime {
         .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
-pub(crate) fn is_unused(path: &std::path::Path, cutoff: SystemTime) -> Result<bool> {
+/// Decide whether a cache whose newest entry was modified at `latest` is
+/// unused.
+///
+/// `None` means there is no `.lake` at all, which is not a stale cache.
+/// This is the single decision point for staleness: callers that already
+/// know the newest mtime (from a size scan) do not have to walk the tree
+/// a second time.
+pub fn is_unused_mtime(latest: Option<SystemTime>, cutoff: SystemTime) -> bool {
+    match latest {
+        None => false,
+        Some(latest) => latest < cutoff,
+    }
+}
+
+/// Decide whether the `.lake` tree at `path` is unused.
+///
+/// This walks the tree. Callers that already know the newest mtime should
+/// use [`is_unused_mtime`] instead so the cache is not walked twice.
+pub fn is_unused(path: &std::path::Path, cutoff: SystemTime) -> Result<bool> {
     if !path.exists() {
         return Ok(false);
     }
@@ -270,7 +288,7 @@ pub(crate) fn is_unused(path: &std::path::Path, cutoff: SystemTime) -> Result<bo
             }
         }
     }
-    Ok(latest < cutoff)
+    Ok(is_unused_mtime(Some(latest), cutoff))
 }
 
 #[cfg(test)]

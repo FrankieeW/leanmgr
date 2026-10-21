@@ -1,14 +1,15 @@
 //! Policy-driven, recoverability-checked cache cleanup.
 
 use crate::clean::{
-    CleanTarget, build_clean_plan, confirm_delete, execute_targets, print_clean_plan,
+    CleanTarget, build_clean_plan_from_scan, confirm_delete, execute_targets, print_clean_plan,
 };
 use crate::cli::{CleanLevel, GcArgs};
 use crate::config::load_config;
-use crate::doctor::{is_unused, unused_cutoff};
+use crate::doctor::{is_unused_mtime, unused_cutoff};
 use crate::output::{format_bytes, parse_bytes, print_json};
 use crate::project::Project;
 use crate::recover::{Recoverability, assess};
+use crate::size::scan_lake;
 use anyhow::{Result, bail};
 use serde::Serialize;
 
@@ -43,14 +44,17 @@ pub fn plan_gc(projects: &[Project], opts: &GcOptions) -> Result<(Vec<CleanTarge
     let cutoff = opts.unused_days.map(unused_cutoff);
 
     for project in projects {
-        if let Some(cutoff) = cutoff {
-            let lake = project.expanded_path().join(".lake");
-            if !is_unused(&lake, cutoff)? {
-                continue;
-            }
+        // One traversal of the `.lake` tree answers both "is this cache
+        // stale?" and "how much would deleting it free?".
+        let scan = scan_lake(project);
+
+        if let Some(cutoff) = cutoff
+            && !is_unused_mtime(scan.size.latest_modified, cutoff)
+        {
+            continue;
         }
 
-        let project_targets = build_clean_plan(std::slice::from_ref(project), opts.level)?;
+        let project_targets = build_clean_plan_from_scan(project, &scan, opts.level)?;
         let bytes: u64 = project_targets.iter().map(|target| target.bytes).sum();
         if bytes == 0 {
             continue;
