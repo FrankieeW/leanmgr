@@ -242,7 +242,10 @@ pub struct SizeArgs {
     #[arg(long)]
     pub tag: Option<String>,
     /// Include all projects.
-    #[arg(long)]
+    ///
+    /// Cannot be combined with a project selector or `--tag`: those would
+    /// silently win, leaving `--all` a flag that does nothing.
+    #[arg(long, conflicts_with_all = ["project", "tag"])]
     pub all: bool,
     /// Emit JSON.
     #[arg(long)]

@@ -253,6 +253,8 @@ line by line and exits at end of input.
 The interactive assistant is intentionally review-first. It does not delete
 cache directories itself; destructive cleanup remains in `leanmgr clean` and
 `leanmgr gc`, where the existing dry-run and confirmation safeguards apply.
+The command it prints after a gc preview covers exactly the scope that was
+previewed, including `--tag` when the session was scoped by one.
 
 ## Size Cache
 
@@ -269,7 +271,9 @@ leanmgr list --tag active --sizes
 ```
 
 Use `leanmgr size` when you want a dedicated real-time size scan instead of a
-quick project index view.
+quick project index view. `--all` is the explicit "no filter" form and cannot
+be combined with a project selector or `--tag`; the combination is rejected
+rather than silently resolved in favour of the filter.
 
 ## Commands
 
@@ -283,7 +287,7 @@ leanmgr remove --missing [--dry-run] [--force]
 leanmgr list [--tag <tag>] [--sizes] [--json]
 leanmgr scan <root> [--yes] [--json]
 leanmgr scan --from-elan [--yes] [--json]
-leanmgr size [<name>] [--tag <tag>] [--all] [--json]
+leanmgr size [<name>] [--tag <tag>] [--all] [--json]   # --all excludes <name> and --tag
 leanmgr doctor [--unused-days 90] [--json]
 leanmgr interact [--unused-days 90] [--tag <tag>]
 leanmgr gitignore [<name>] [--tag <tag>] [--all] [--dry-run]
