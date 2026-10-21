@@ -21,6 +21,7 @@ pub mod project;
 pub mod prompt;
 pub mod recover;
 pub mod restore;
+pub mod shared_cache;
 pub mod size;
 pub mod tags;
 pub mod toolchain;

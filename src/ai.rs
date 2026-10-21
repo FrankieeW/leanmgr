@@ -8,7 +8,7 @@ use crate::config::load_config;
 use crate::output::{format_bytes, print_json};
 use crate::project::{Project, filter_by_tag};
 use crate::prompt::confirm;
-use crate::size::{ProjectSize, project_size};
+use crate::size::{ProjectSize, measure_projects};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use std::env;
@@ -157,11 +157,11 @@ fn skill_add_command(args: AiSkillAddArgs) -> Result<()> {
 }
 
 fn build_context(projects: &[&Project]) -> Result<AiProjectContext> {
-    let mut ai_projects = Vec::new();
-    for project in projects {
-        let size = project_size(project)?;
-        ai_projects.push(project_context(project, size));
-    }
+    let ai_projects: Vec<AiProject> = projects
+        .iter()
+        .zip(measure_projects(projects))
+        .map(|(project, size)| project_context(project, size))
+        .collect();
     Ok(AiProjectContext {
         project_count: ai_projects.len(),
         projects: ai_projects,

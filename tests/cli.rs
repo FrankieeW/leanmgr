@@ -54,8 +54,10 @@ impl Sandbox {
         }
     }
 
-    /// A command that sees only the sandbox: its config dir, an empty Git
-    /// configuration, and no repository above the sandbox root.
+    /// A command that sees only the sandbox: its config dir, its own elan
+    /// home and Mathlib cache, an empty Git configuration, and no
+    /// repository above the sandbox root. A fake `elan` installed with
+    /// `fake_elan` comes first on `PATH`.
     fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
         let mut command = Command::new(program);
         for var in INHERITED_GIT_VARS {
@@ -64,11 +66,37 @@ impl Sandbox {
         command
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env("APPDATA", self.root.join("config"))
+            .env("ELAN_HOME", self.root.join("elan"))
+            .env("MATHLIB_CACHE_DIR", self.root.join("mathlib-cache"))
             .env("GIT_CONFIG_GLOBAL", self.root.join("gitconfig"))
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CEILING_DIRECTORIES", &self.root)
             .current_dir(&self.root);
+        let bin = self.root.join("bin");
+        if bin.is_dir() {
+            let inherited = std::env::var_os("PATH").unwrap_or_default();
+            let paths = std::iter::once(bin).chain(std::env::split_paths(&inherited));
+            command.env("PATH", std::env::join_paths(paths).unwrap());
+        }
         command
+    }
+
+    /// Put a fake `elan` on the sandbox `PATH`: `toolchain gc --json`
+    /// prints `gc_report`, and `toolchain list` lists v4.9.0 as default.
+    #[cfg(unix)]
+    fn fake_elan(&self, gc_report: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = self.root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("gc.json"), gc_report).unwrap();
+        let script = "#!/bin/sh\n\
+            case \"$*\" in\n\
+              \"toolchain gc --json\") cat \"$(dirname \"$0\")/gc.json\" ;;\n\
+              \"toolchain list\") echo \"leanprover/lean4:v4.9.0 (default)\" ;;\n\
+              *) exit 1 ;;\n\
+            esac\n";
+        fs::write(bin.join("elan"), script).unwrap();
+        fs::set_permissions(bin.join("elan"), fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     /// Run sandboxed `git` in `dir`.
@@ -509,4 +537,105 @@ fn scan_rejects_a_missing_root() {
     let run = sandbox.run(&["scan", "does-not-exist"], "");
     assert!(!run.status.success());
     assert!(run.stderr.contains("scan root is not a directory"));
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_reports_shared_caches_and_unused_toolchains() {
+    let sandbox = Sandbox::new("doctor_shared");
+    let project = sandbox.project("demo", 16, true);
+    sandbox.write_config(&[("demo", &project)]);
+    fs::create_dir_all(sandbox.root.join("mathlib-cache")).unwrap();
+    fs::write(sandbox.root.join("mathlib-cache/a.ltar"), vec![0u8; 100]).unwrap();
+    let toolchain = sandbox
+        .root
+        .join("elan/toolchains/leanprover--lean4---v4.8.0/bin");
+    fs::create_dir_all(&toolchain).unwrap();
+    fs::write(toolchain.join("lean"), vec![0u8; 50]).unwrap();
+    sandbox
+        .fake_elan(r#"{"unused_toolchains": ["leanprover/lean4:v4.8.0"], "used_toolchains": []}"#);
+
+    let json = sandbox.run(&["doctor", "--json"], "");
+    assert!(json.status.success(), "stderr: {}", json.stderr);
+    let report: serde_json::Value = serde_json::from_str(&json.stdout).unwrap();
+    assert!(
+        report["potential_hard_reclaim"].is_u64(),
+        "existing keys stay"
+    );
+    let shared = &report["shared_caches"];
+    assert_eq!(shared["mathlib_downloads"]["bytes"], 100);
+    assert_eq!(shared["elan_toolchains"]["bytes"], 50);
+    assert_eq!(
+        shared["unused_toolchains"][0]["toolchain"],
+        "leanprover/lean4:v4.8.0"
+    );
+    assert_eq!(shared["unused_toolchains"][0]["bytes"], 50);
+
+    let human = sandbox.run(&["doctor"], "");
+    assert!(
+        human
+            .stdout
+            .contains("`elan toolchain gc --delete` removes 1 toolchain(s)"),
+        "{}",
+        human.stdout
+    );
+
+    let check = sandbox.run(&["toolchain", "check"], "");
+    assert!(check.stdout.contains("Unused installed toolchains"));
+    assert!(check.stdout.contains("leanprover/lean4:v4.8.0"));
+    assert!(check.stdout.contains("installed"), "v4.9.0 is installed");
+}
+
+#[cfg(unix)]
+#[test]
+fn scan_from_elan_adds_known_lake_projects_only() {
+    let sandbox = Sandbox::new("scan_from_elan");
+    let known = sandbox.project("known", 16, true);
+    let dependency = known.join(".lake/packages/dep");
+    fs::create_dir_all(&dependency).unwrap();
+    fs::write(dependency.join("lakefile.toml"), b"name = \"dep\"").unwrap();
+    let report = serde_json::json!({
+        "unused_toolchains": [],
+        "used_toolchains": [
+            {"user": known.display().to_string(), "toolchain": "leanprover/lean4:v4.9.0"},
+            {"user": dependency.display().to_string(), "toolchain": "leanprover/lean4:v4.9.0"},
+            {"user": "default toolchain", "toolchain": "leanprover/lean4:v4.9.0"}
+        ]
+    });
+    sandbox.fake_elan(&report.to_string());
+
+    let preview = sandbox.run(&["scan", "--from-elan"], "");
+    assert!(preview.status.success(), "stderr: {}", preview.stderr);
+    assert!(preview.stdout.contains("known  "));
+    assert!(!preview.stdout.contains("packages/dep"));
+
+    let added = sandbox.run(&["scan", "--from-elan", "--yes"], "");
+    assert!(
+        added.stdout.contains("Added 1 project(s)"),
+        "{}",
+        added.stdout
+    );
+    let again = sandbox.run(&["scan", "--from-elan"], "");
+    assert!(again.stdout.contains("(already indexed)"));
+}
+
+#[test]
+fn gc_budget_and_age_filter_combine() {
+    let sandbox = Sandbox::new("gc_combined");
+    let project = sandbox.project("old", 1024, true);
+    sandbox.write_config(&[("old", &project)]);
+
+    let run = sandbox.run(
+        &["gc", "--unused-days", "0", "--target", "1KiB", "--json"],
+        "",
+    );
+
+    assert!(run.status.success(), "stderr: {}", run.stderr);
+    let report: serde_json::Value = serde_json::from_str(&run.stdout).unwrap();
+    assert_eq!(report["mode"]["unused_days"], 0);
+    assert_eq!(report["mode"]["target_bytes"], 1024);
+    assert_eq!(report["targets"].as_array().unwrap().len(), 1);
+
+    let neither = sandbox.run(&["gc"], "");
+    assert!(!neither.status.success());
 }

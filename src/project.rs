@@ -6,7 +6,7 @@ use crate::lake::has_lakefile;
 use crate::output::{format_age, format_bytes, print_json, print_table};
 use crate::paths::{display_path, expand_tilde, normalize_existing_or_join, now_secs, now_string};
 use crate::prompt::confirm;
-use crate::size::{ProjectSize, project_size};
+use crate::size::{ProjectSize, measure_projects};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -251,7 +251,7 @@ fn missing_entries(projects: &[Project]) -> Vec<(String, String)> {
 pub fn list_projects(args: ListArgs) -> Result<()> {
     let mut config = load_config()?;
     if args.sizes {
-        refresh_size_cache(&mut config.projects, args.tag.as_deref())?;
+        refresh_size_cache(&mut config.projects, args.tag.as_deref());
         save_config(&config)?;
     }
 
@@ -293,15 +293,15 @@ fn list_row(project: &Project, now: u64) -> Vec<String> {
     ]
 }
 
-fn refresh_size_cache(projects: &mut [Project], tag: Option<&str>) -> Result<()> {
-    for project in projects {
-        if tag.is_some_and(|tag| !project.has_tag(tag)) {
-            continue;
-        }
-        let size = project_size(project)?;
-        project.size_cache = Some(SizeCache::from_project_size(&size));
+fn refresh_size_cache(projects: &mut [Project], tag: Option<&str>) {
+    let selected: Vec<usize> = (0..projects.len())
+        .filter(|&index| tag.is_none_or(|tag| projects[index].has_tag(tag)))
+        .collect();
+    let to_measure: Vec<&Project> = selected.iter().map(|&index| &projects[index]).collect();
+    let sizes = measure_projects(&to_measure);
+    for (index, size) in selected.into_iter().zip(sizes) {
+        projects[index].size_cache = Some(SizeCache::from_project_size(&size));
     }
-    Ok(())
 }
 
 fn cached_size_cells(project: &Project, now: u64) -> (String, String) {

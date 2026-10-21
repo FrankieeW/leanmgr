@@ -3,9 +3,10 @@
 use crate::cli::ToolchainCommands;
 use crate::config::load_config;
 use crate::lake::read_toolchain;
-use crate::output::print_table;
+use crate::output::{format_bytes, print_table};
 use crate::process::stdout;
 use crate::project::Project;
+use crate::shared_cache::{UnusedToolchain, unused_toolchains};
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -18,9 +19,40 @@ pub fn toolchain_command(command: ToolchainCommands) -> Result<()> {
     let census = ToolchainCensus::of(&config.projects);
     match command {
         ToolchainCommands::List => list_toolchains(&census),
-        ToolchainCommands::Check => check_toolchains(&census, installed_toolchains().as_ref()),
+        ToolchainCommands::Check => {
+            check_toolchains(&census, installed_toolchains().as_ref());
+            if let Some(unused) = unused_toolchains() {
+                print_unused_toolchains(&unused);
+            }
+        }
     }
     Ok(())
+}
+
+/// Report installed toolchains that elan's own garbage collector considers
+/// unused (no known project, override, or default refers to them).
+fn print_unused_toolchains(unused: &[UnusedToolchain]) {
+    if unused.is_empty() {
+        println!("No unused installed toolchains (per `elan toolchain gc`).");
+        return;
+    }
+    println!("Unused installed toolchains (per `elan toolchain gc`):");
+    let rows: Vec<Vec<String>> = unused
+        .iter()
+        .map(|toolchain| {
+            let size = toolchain
+                .bytes
+                .map(format_bytes)
+                .unwrap_or_else(|| "unknown".to_string());
+            vec![toolchain.toolchain.clone(), size]
+        })
+        .collect();
+    print_table(&["TOOLCHAIN", "SIZE"], &rows);
+    let total: u64 = unused.iter().filter_map(|toolchain| toolchain.bytes).sum();
+    println!(
+        "Hint: `elan toolchain gc --delete` removes them ({}).",
+        format_bytes(total)
+    );
 }
 
 /// Which toolchains the indexed projects pin, and how many projects could

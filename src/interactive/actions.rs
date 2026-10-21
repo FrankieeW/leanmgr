@@ -13,7 +13,7 @@ use super::helpers::{
 use crate::clean::build_clean_plan;
 use crate::cli::CleanLevel;
 use crate::doctor::DoctorReport;
-use crate::gc::{GcMode, GcOptions, plan_gc};
+use crate::gc::{GcOptions, plan_gc};
 use crate::output::format_bytes;
 use crate::project::Project;
 use crate::restore::{RestoreStep, plan_restore};
@@ -96,7 +96,8 @@ pub(super) fn print_gc_dry_run<W: Write>(
     output: &mut W,
 ) -> Result<()> {
     let opts = GcOptions {
-        mode: GcMode::UnusedDays(unused_days),
+        unused_days: Some(unused_days),
+        target: None,
         level: CleanLevel::Hard,
         include_unrecoverable: false,
     };

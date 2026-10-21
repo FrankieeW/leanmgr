@@ -220,7 +220,11 @@ pub struct ListArgs {
 #[derive(Debug, Args)]
 pub struct ScanArgs {
     /// Root directory to scan.
-    pub root: String,
+    #[arg(required_unless_present = "from_elan", conflicts_with = "from_elan")]
+    pub root: Option<String>,
+    /// Discover the projects elan has seen Lean used in, wherever they are.
+    #[arg(long)]
+    pub from_elan: bool,
     /// Add discovered projects without prompting.
     #[arg(long)]
     pub yes: bool,
@@ -319,10 +323,12 @@ pub enum CleanLevel {
 /// Arguments for `leanmgr gc`.
 #[derive(Debug, Args)]
 pub struct GcArgs {
-    /// Target projects whose `.lake` is older than this many days.
-    #[arg(long, conflicts_with = "target")]
+    /// Only consider projects whose `.lake` is older than this many days.
+    #[arg(long, required_unless_present = "target")]
     pub unused_days: Option<u64>,
-    /// Reclaim until at least this much space is freed (e.g. 20GiB).
+    /// Reclaim until at least this much space is freed (e.g. 20GiB),
+    /// largest caches first. Combine with --unused-days to keep recently
+    /// used caches out of reach.
     #[arg(long)]
     pub target: Option<String>,
     /// Filter by tag. Default scope is all projects.

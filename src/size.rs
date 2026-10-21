@@ -6,7 +6,10 @@ use crate::output::{format_bytes, print_json, print_table};
 use crate::project::{Project, filter_by_tag, matches_project};
 use anyhow::{Result, bail};
 use serde::Serialize;
+use std::num::NonZeroUsize;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::SystemTime;
 use walkdir::{DirEntry, WalkDir};
 
 /// Size summary for one project.
@@ -22,6 +25,10 @@ pub struct ProjectSize {
     pub packages: u64,
     /// Total bytes counted for the project.
     pub total: u64,
+    /// Newest modification time of anything under `.lake`; `None` when
+    /// there is no `.lake`. Feeds staleness checks, not JSON output.
+    #[serde(skip)]
+    pub latest_modified: Option<SystemTime>,
 }
 
 /// Multi-project size report.
@@ -43,8 +50,7 @@ pub fn size_command(args: SizeArgs) -> Result<()> {
     )?;
 
     let mut report = SizeReport::default();
-    for project in selected {
-        let size = project_size(project)?;
+    for size in measure_projects(&selected) {
         report.total += size.total;
         report.projects.push(size);
     }
@@ -94,39 +100,95 @@ fn select_sized<'a>(
     Ok(matched)
 }
 
-/// Compute `.lake`-related size for one project.
+/// Measure several projects at once, returning sizes in input order.
 ///
-/// Walks `.lake` once and buckets bytes by subtree. `build` and `packages` are
-/// subtrees of `.lake`, so a single traversal avoids re-walking the bulk of the
-/// cache three times.
-pub fn project_size(project: &Project) -> Result<ProjectSize> {
-    let root = project.expanded_path();
-    let lake = root.join(".lake");
-    let build = lake.join("build");
-    let packages = lake.join("packages");
-
-    let mut lake_size = 0;
-    let mut build_size = 0;
-    let mut packages_size = 0;
-
-    if lake.exists() {
-        for (entry, len) in files_with_sizes(&lake) {
-            lake_size += len;
-            if entry.path().starts_with(&build) {
-                build_size += len;
-            } else if entry.path().starts_with(&packages) {
-                packages_size += len;
-            }
-        }
+/// Walking `.lake` trees is dominated by filesystem metadata calls, so a
+/// handful of walks in flight finish much sooner than one after another.
+pub fn measure_projects(projects: &[&Project]) -> Vec<ProjectSize> {
+    const MAX_WORKERS: usize = 8;
+    let workers = std::thread::available_parallelism()
+        .map_or(1, NonZeroUsize::get)
+        .min(MAX_WORKERS)
+        .min(projects.len());
+    if workers <= 1 {
+        return projects
+            .iter()
+            .map(|project| project_size(project))
+            .collect();
     }
 
-    Ok(ProjectSize {
+    let next = AtomicUsize::new(0);
+    let mut measured: Vec<(usize, ProjectSize)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut done = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(project) = projects.get(index) else {
+                            break done;
+                        };
+                        done.push((index, project_size(project)));
+                    }
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    });
+    measured.sort_by_key(|(index, _)| *index);
+    measured.into_iter().map(|(_, size)| size).collect()
+}
+
+/// Compute `.lake`-related size for one project.
+///
+/// Walks `.lake` once: file bytes are bucketed by subtree (`build` and
+/// `packages` are subtrees of `.lake`), and the newest modification time
+/// of any entry is recorded, so callers needing both size and staleness
+/// never walk the tree twice. Entries that vanish or cannot be read
+/// mid-walk (a concurrent `lake build`) are skipped.
+pub fn project_size(project: &Project) -> ProjectSize {
+    let lake = project.expanded_path().join(".lake");
+    let build = lake.join("build");
+    let packages = lake.join("packages");
+    let mut size = ProjectSize {
         project: project.name.clone(),
-        lake: lake_size,
-        build: build_size,
-        packages: packages_size,
-        total: lake_size,
-    })
+        ..ProjectSize::default()
+    };
+    if !lake.exists() {
+        return size;
+    }
+
+    let entries = WalkDir::new(&lake)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok);
+    for entry in entries {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if let Ok(modified) = metadata.modified() {
+            size.latest_modified = size.latest_modified.max(Some(modified));
+        }
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let len = metadata.len();
+        size.lake += len;
+        if entry.path().starts_with(&build) {
+            size.build += len;
+        } else if entry.path().starts_with(&packages) {
+            size.packages += len;
+        }
+    }
+    size.total = size.lake;
+    size
 }
 
 /// Return the recursive size of a directory, or zero when missing.
@@ -225,6 +287,70 @@ mod tests {
     }
 
     #[test]
+    fn measure_projects_matches_sequential_sizes_in_input_order() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("leanmgr-measure-{nonce}"));
+        let projects: Vec<Project> = (0..12)
+            .map(|index| {
+                let dir = root.join(format!("p{index}"));
+                fs::create_dir_all(dir.join(".lake/build")).unwrap();
+                fs::write(dir.join(".lake/build/blob"), vec![b'x'; index * 100]).unwrap();
+                Project {
+                    path: dir.display().to_string(),
+                    ..named(&format!("p{index}"))
+                }
+            })
+            .collect();
+        let refs: Vec<&Project> = projects.iter().collect();
+
+        let parallel = measure_projects(&refs);
+
+        let names: Vec<&str> = parallel.iter().map(|size| size.project.as_str()).collect();
+        let expected: Vec<String> = (0..12).map(|index| format!("p{index}")).collect();
+        assert_eq!(names, expected);
+        for (size, project) in parallel.iter().zip(&projects) {
+            let sequential = project_size(project);
+            assert_eq!(size.total, sequential.total);
+            assert_eq!(size.build, sequential.build);
+        }
+        assert!(measure_projects(&[]).is_empty());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn project_size_records_the_newest_modification() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("leanmgr-size-mtime-{nonce}"));
+        fs::create_dir_all(root.join(".lake/build")).unwrap();
+        let newest = SystemTime::now() + std::time::Duration::from_secs(7200);
+        fs::write(root.join(".lake/build/fresh"), b"x").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(root.join(".lake/build/fresh"))
+            .unwrap()
+            .set_modified(newest)
+            .unwrap();
+        let project = Project {
+            path: root.display().to_string(),
+            ..named("mtime")
+        };
+
+        assert_eq!(project_size(&project).latest_modified, Some(newest));
+        let no_lake = Project {
+            path: root.join("absent").display().to_string(),
+            ..named("absent")
+        };
+        assert_eq!(project_size(&no_lake).latest_modified, None);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn project_size_buckets_build_and_packages_in_one_pass() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -248,7 +374,7 @@ mod tests {
             size_cache: None,
         };
 
-        let size = project_size(&project).unwrap();
+        let size = project_size(&project);
         assert_eq!(size.build, 4);
         assert_eq!(size.packages, 2);
         assert_eq!(size.lake, 7);

@@ -6,7 +6,8 @@ use crate::lake::has_lakefile;
 use crate::output::print_json;
 use crate::paths::{display_path, expand_tilde, normalize_existing_or_join, now_string};
 use crate::project::Project;
-use anyhow::{Result, bail};
+use crate::shared_cache::elan_known_project_dirs;
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -23,7 +24,36 @@ pub struct DiscoveredProject {
 
 /// Run the scan command.
 pub fn scan_command(args: ScanArgs) -> Result<()> {
-    let root = normalize_existing_or_join(&expand_tilde(&args.root))?;
+    let discovered = match args.root.as_deref() {
+        Some(root) => scan_root(root)?,
+        None => elan_projects()?,
+    };
+
+    if args.json {
+        return print_json(&discovered);
+    }
+
+    let indexed = indexed_paths(&load_config()?.projects);
+    for project in &discovered {
+        let marker = if indexed.contains(&canonical_or_raw(Path::new(&project.path))) {
+            "  (already indexed)"
+        } else {
+            ""
+        };
+        println!("{}  {}{marker}", project.name, project.path);
+    }
+
+    if args.yes {
+        add_discovered(discovered)?;
+    } else {
+        println!("Run with --yes to add discovered projects.");
+    }
+
+    Ok(())
+}
+
+fn scan_root(root: &str) -> Result<Vec<DiscoveredProject>> {
+    let root = normalize_existing_or_join(&expand_tilde(root))?;
     if !root.is_dir() {
         bail!("scan root is not a directory: {}", root.display());
     }
@@ -36,23 +66,36 @@ pub fn scan_command(args: ScanArgs) -> Result<()> {
             root.display()
         );
     }
-    let discovered = scan.projects;
+    Ok(scan.projects)
+}
 
-    if args.json {
-        return print_json(&discovered);
-    }
+/// Lake projects elan has seen Lean used in, wherever they live.
+fn elan_projects() -> Result<Vec<DiscoveredProject>> {
+    let dirs = elan_known_project_dirs().context(
+        "could not read elan's known projects from `elan toolchain gc --json`; \
+         update elan (`elan self update`) or scan a directory instead",
+    )?;
+    Ok(known_lake_projects(&dirs))
+}
 
-    for project in &discovered {
-        println!("{}  {}", project.name, project.path);
-    }
-
-    if args.yes {
-        add_discovered(discovered)?;
-    } else {
-        println!("Run with --yes to add discovered projects.");
-    }
-
-    Ok(())
+/// Keep the directories that are Lake projects in their own right.
+///
+/// elan also records dependency checkouts (under `.lake/packages`) and
+/// other build trees; any path through a directory `scan` would prune is
+/// left out, as is anything that no longer has a Lake file.
+fn known_lake_projects(dirs: &[PathBuf]) -> Vec<DiscoveredProject> {
+    let mut projects: Vec<DiscoveredProject> = dirs
+        .iter()
+        .filter(|dir| {
+            !dir.components()
+                .any(|component| is_pruned_name(&component.as_os_str().to_string_lossy()))
+        })
+        .filter(|dir| dir.is_dir() && has_lakefile(dir))
+        .map(|dir| discovered_from_path(dir))
+        .collect();
+    projects.sort_by(|left, right| left.path.cmp(&right.path));
+    projects.dedup_by(|left, right| left.path == right.path);
+    projects
 }
 
 /// Lake projects found under a scan root.
@@ -114,10 +157,7 @@ fn merge_discovered(
     discovered: Vec<DiscoveredProject>,
     now: &str,
 ) -> usize {
-    let mut indexed: HashSet<PathBuf> = projects
-        .iter()
-        .map(|project| canonical_or_raw(&project.expanded_path()))
-        .collect();
+    let mut indexed = indexed_paths(projects);
     let mut added = 0;
     for item in discovered {
         if !indexed.insert(canonical_or_raw(Path::new(&item.path))) {
@@ -137,6 +177,14 @@ fn merge_discovered(
         added += 1;
     }
     added
+}
+
+/// Canonical paths of the indexed projects, for duplicate detection.
+fn indexed_paths(projects: &[Project]) -> HashSet<PathBuf> {
+    projects
+        .iter()
+        .map(|project| canonical_or_raw(&project.expanded_path()))
+        .collect()
 }
 
 fn canonical_or_raw(path: &Path) -> PathBuf {
@@ -174,8 +222,14 @@ fn discovered_from_path(path: &Path) -> DiscoveredProject {
 }
 
 fn is_pruned(entry: &DirEntry) -> bool {
-    let name = entry.file_name().to_string_lossy();
-    matches!(name.as_ref(), ".git" | ".lake" | "target" | "node_modules")
+    is_pruned_name(&entry.file_name().to_string_lossy())
+}
+
+/// Directory names that never contain projects of their own: Git
+/// metadata, Lake caches (including dependency checkouts), and other
+/// build or package trees.
+fn is_pruned_name(name: &str) -> bool {
+    matches!(name, ".git" | ".lake" | "target" | "node_modules")
 }
 
 #[cfg(test)]
@@ -221,6 +275,33 @@ mod tests {
         if !scan.projects.iter().any(|project| project.name == "C") {
             assert_eq!(scan.unreadable, 1);
         }
+    }
+
+    #[test]
+    fn elan_known_dirs_keep_only_real_lake_projects() {
+        let root = test_dir("elan_known_dirs");
+        for dir in ["Proj", "NotLake", "Proj/.lake/packages/mathlib"] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        fs::write(root.join("Proj/lakefile.toml"), b"name = \"Proj\"").unwrap();
+        fs::write(
+            root.join("Proj/.lake/packages/mathlib/lakefile.lean"),
+            b"package mathlib",
+        )
+        .unwrap();
+        let dirs = vec![
+            root.join("Proj"),
+            root.join("NotLake"),
+            root.join("Proj/.lake/packages/mathlib"),
+            root.join("Gone"),
+            root.join("Proj"),
+        ];
+
+        let found = known_lake_projects(&dirs);
+
+        let names: Vec<&str> = found.iter().map(|project| project.name.as_str()).collect();
+        assert_eq!(names, vec!["Proj"]);
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

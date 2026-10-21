@@ -11,19 +11,15 @@ use crate::project::Project;
 use crate::recover::{Recoverability, assess};
 use anyhow::{Result, bail};
 use serde::Serialize;
-use std::time::SystemTime;
 
-/// How gc selects which projects to clean.
-pub enum GcMode {
-    /// Projects whose `.lake` mtime is older than N days.
-    UnusedDays(u64),
-    /// Reclaim until at least this many bytes are freed (largest first).
-    Target(u64),
-}
-
-/// Resolved gc options.
+/// Resolved gc options. At least one of `unused_days` and `target` is set;
+/// together they mean "free `target` bytes from caches unused for
+/// `unused_days`", so a size budget can never reach an active project.
 pub struct GcOptions {
-    pub mode: GcMode,
+    /// Only consider projects whose `.lake` mtime is older than N days.
+    pub unused_days: Option<u64>,
+    /// Stop once at least this many bytes are selected, largest first.
+    pub target: Option<u64>,
     pub level: CleanLevel,
     pub include_unrecoverable: bool,
 }
@@ -44,11 +40,7 @@ pub fn plan_gc(projects: &[Project], opts: &GcOptions) -> Result<(Vec<CleanTarge
 
     let mut candidates: Vec<Candidate> = Vec::new();
     let mut skipped: Vec<GcSkip> = Vec::new();
-
-    let cutoff: Option<SystemTime> = match opts.mode {
-        GcMode::UnusedDays(days) => Some(unused_cutoff(days)),
-        GcMode::Target(_) => None,
-    };
+    let cutoff = opts.unused_days.map(unused_cutoff);
 
     for project in projects {
         if let Some(cutoff) = cutoff {
@@ -81,13 +73,13 @@ pub fn plan_gc(projects: &[Project], opts: &GcOptions) -> Result<(Vec<CleanTarge
     }
 
     let mut targets = Vec::new();
-    match opts.mode {
-        GcMode::UnusedDays(_) => {
+    match opts.target {
+        None => {
             for candidate in candidates {
                 targets.extend(candidate.targets);
             }
         }
-        GcMode::Target(budget) => {
+        Some(budget) => {
             candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.bytes));
             let mut freed = 0u64;
             for candidate in candidates {
@@ -103,11 +95,14 @@ pub fn plan_gc(projects: &[Project], opts: &GcOptions) -> Result<(Vec<CleanTarge
     Ok((targets, skipped))
 }
 
+/// The selection policy as reported by `gc --json`: `{"unused_days": N}`,
+/// `{"target_bytes": N}`, or both when combined.
 #[derive(Serialize)]
-#[serde(untagged)]
-enum GcModeJson {
-    UnusedDays { unused_days: u64 },
-    Target { target_bytes: u64 },
+struct GcModeJson {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unused_days: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_bytes: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -119,21 +114,23 @@ struct GcReport<'a> {
     executed: bool,
 }
 
-impl From<&GcMode> for GcModeJson {
-    fn from(mode: &GcMode) -> Self {
-        match *mode {
-            GcMode::UnusedDays(days) => Self::UnusedDays { unused_days: days },
-            GcMode::Target(bytes) => Self::Target {
-                target_bytes: bytes,
-            },
+impl From<&GcOptions> for GcModeJson {
+    fn from(opts: &GcOptions) -> Self {
+        Self {
+            unused_days: opts.unused_days,
+            target_bytes: opts.target,
         }
     }
 }
 
 /// Run the gc command: select by policy, report, confirm, and delete.
 pub fn gc_command(args: GcArgs) -> Result<()> {
+    if args.unused_days.is_none() && args.target.is_none() {
+        bail!("select --unused-days, --target, or both");
+    }
     let opts = GcOptions {
-        mode: gc_mode(args.unused_days, args.target.as_deref())?,
+        unused_days: args.unused_days,
+        target: args.target.as_deref().map(parse_bytes).transpose()?,
         level: args.level,
         include_unrecoverable: args.include_unrecoverable,
     };
@@ -159,7 +156,7 @@ pub fn gc_command(args: GcArgs) -> Result<()> {
             execute_targets(&targets, true)?;
         }
         return print_json(&GcReport {
-            mode: GcModeJson::from(&opts.mode),
+            mode: GcModeJson::from(&opts),
             targets: &targets,
             skipped: &skipped,
             total_bytes: total,
@@ -177,16 +174,6 @@ pub fn gc_command(args: GcArgs) -> Result<()> {
         return Ok(());
     }
     execute_targets(&targets, false)
-}
-
-fn gc_mode(unused_days: Option<u64>, target: Option<&str>) -> Result<GcMode> {
-    match (unused_days, target) {
-        (Some(_), Some(_)) | (None, None) => {
-            bail!("select exactly one of --unused-days or --target")
-        }
-        (Some(days), None) => Ok(GcMode::UnusedDays(days)),
-        (None, Some(value)) => Ok(GcMode::Target(parse_bytes(value)?)),
-    }
 }
 
 fn print_gc_plan(targets: &[CleanTarget], skipped: &[GcSkip], total: u64) {
@@ -248,7 +235,8 @@ mod tests {
         let ok = mk_project(&root, "ok", 1024, true);
         let bad = mk_project(&root, "bad", 1024, false);
         let opts = GcOptions {
-            mode: GcMode::UnusedDays(0),
+            unused_days: Some(0),
+            target: None,
             level: CleanLevel::Hard,
             include_unrecoverable: false,
         };
@@ -266,7 +254,8 @@ mod tests {
         let ok = mk_project(&root, "ok", 1024, true);
         let bad = mk_project(&root, "bad", 1024, false);
         let opts = GcOptions {
-            mode: GcMode::UnusedDays(0),
+            unused_days: Some(0),
+            target: None,
             level: CleanLevel::Hard,
             include_unrecoverable: true,
         };
@@ -283,7 +272,8 @@ mod tests {
         let mid = mk_project(&root, "mid", 2048, true);
         let small = mk_project(&root, "small", 1024, true);
         let opts = GcOptions {
-            mode: GcMode::Target(5000),
+            unused_days: None,
+            target: Some(5000),
             level: CleanLevel::Hard,
             include_unrecoverable: false,
         };
@@ -296,6 +286,45 @@ mod tests {
         assert!(names.contains(&"big".to_string()));
         assert!(names.contains(&"mid".to_string()));
         assert!(skipped.is_empty());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn unused_days_keeps_a_budget_away_from_active_caches() {
+        let root = tmp("gc_budget_unused");
+        let active = mk_project(&root, "active", 4096, true);
+        let stale = mk_project(&root, "stale", 2048, true);
+        // A write "in the future" keeps `active` newer than any cutoff.
+        let in_an_hour = SystemTime::now() + std::time::Duration::from_secs(3600);
+        fs::File::options()
+            .write(true)
+            .open(active.expanded_path().join(".lake/blob"))
+            .unwrap()
+            .set_modified(in_an_hour)
+            .unwrap();
+        let projects = [active, stale];
+        let budget_only = GcOptions {
+            unused_days: None,
+            target: Some(1000),
+            level: CleanLevel::Hard,
+            include_unrecoverable: false,
+        };
+        let (targets, _) = plan_gc(&projects, &budget_only).unwrap();
+        assert_eq!(
+            targets[0].project, "active",
+            "largest first without a filter"
+        );
+
+        let protected = GcOptions {
+            unused_days: Some(0),
+            ..budget_only
+        };
+        let (targets, _) = plan_gc(&projects, &protected).unwrap();
+        let names: Vec<&str> = targets
+            .iter()
+            .map(|target| target.project.as_str())
+            .collect();
+        assert_eq!(names, vec!["stale"]);
         fs::remove_dir_all(&root).unwrap();
     }
 }

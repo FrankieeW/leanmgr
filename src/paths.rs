@@ -53,7 +53,7 @@ pub fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-fn home_dir() -> Result<PathBuf> {
+pub(crate) fn home_dir() -> Result<PathBuf> {
     env::var_os("HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("USERPROFILE").map(PathBuf::from))
