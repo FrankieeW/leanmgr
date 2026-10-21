@@ -8,12 +8,12 @@ use super::actions::{
 };
 use super::helpers::{truncate_display, write_menu_line, write_metric_line};
 use super::summary::summarize_fleet;
-use crate::doctor::DoctorReport;
+use crate::doctor::{DoctorReport, build_doctor_report};
 use crate::output::format_bytes;
 use crate::project::Project;
 use anyhow::Result;
 use crossterm::cursor::{MoveToColumn, MoveUp};
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::queue;
 use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
@@ -30,7 +30,7 @@ pub(super) enum MenuAction {
 }
 
 /// Menu rows for the keyboard dashboard. Order matches the action
-/// indices used by `read_menu_action` and `run_menu_action`.
+/// indices used by `menu_action_for` and `run_menu_action`.
 const KEYBOARD_ACTIONS: &[(&str, &str)] = &[
     ("List projects", "Browse indexed projects and cached sizes"),
     (
@@ -42,11 +42,6 @@ const KEYBOARD_ACTIONS: &[(&str, &str)] = &[
     ("Restore command", "Build a restore command for one project"),
 ];
 
-/// Number of lines the keyboard menu occupies. Used to rewind the
-/// cursor on each redraw so we don't need a fullscreen alternate
-/// terminal — output stays in normal scrollback.
-const KEYBOARD_MENU_LINES: u16 = 13;
-
 /// Run the keyboard dashboard for the duration of one session.
 pub(super) fn run_keyboard_session(projects: &[Project], unused_days: u64) -> Result<()> {
     if projects.is_empty() {
@@ -57,45 +52,39 @@ pub(super) fn run_keyboard_session(projects: &[Project], unused_days: u64) -> Re
 
     let mut output = std::io::stdout();
     let mut selected = 0usize;
-    let mut first_render = true;
+    // Lines drawn by the previous frame; a redraw rewinds exactly this many.
+    let mut drawn_lines = 0u16;
+    // Walking every `.lake` is the slow part, so the report is built once
+    // and rebuilt only on an explicit refresh, never on navigation keys.
+    let mut doctor = build_doctor_report(projects, unused_days)?;
 
     loop {
-        let doctor = crate::doctor::build_doctor_report(projects, unused_days)?;
-        render_keyboard_menu(
+        drawn_lines = render_keyboard_menu(
             projects,
             &doctor,
             unused_days,
             selected,
-            first_render,
+            drawn_lines,
             &mut output,
         )?;
-        first_render = false;
 
-        crossterm::terminal::enable_raw_mode()?;
-        let action = read_menu_action(&mut selected);
-        let result = crossterm::terminal::disable_raw_mode();
-        result?;
-        let action = action?;
-
-        match action {
+        match with_raw_mode(|| read_menu_action(&mut selected))? {
             MenuAction::Open(index) => {
                 println!();
-                run_menu_action(index, projects, &doctor, unused_days)?;
+                // A bad answer inside an action must not end the session.
+                if let Err(error) = run_menu_action(index, projects, &doctor, unused_days) {
+                    println!("Error: {error:#}");
+                }
                 println!();
                 println!("Press any key to return to the menu, or q to quit.");
-                crossterm::terminal::enable_raw_mode()?;
-                let key = read_key_code();
-                let result = crossterm::terminal::disable_raw_mode();
-                result?;
-                let key = key?;
-                if matches!(key, KeyCode::Char('q') | KeyCode::Esc) {
+                if is_quit_key(with_raw_mode(read_key)?) {
                     println!("Done.");
                     break;
                 }
-                first_render = true;
+                drawn_lines = 0;
             }
             MenuAction::Refresh => {
-                first_render = true;
+                doctor = build_doctor_report(projects, unused_days)?;
             }
             MenuAction::Quit => {
                 println!();
@@ -109,29 +98,61 @@ pub(super) fn run_keyboard_session(projects: &[Project], unused_days: u64) -> Re
     Ok(())
 }
 
-/// Render the keyboard dashboard frame, rewinding the cursor on
-/// subsequent frames.
+/// Run `read` with the terminal in raw mode, restoring cooked mode even
+/// when `read` fails.
+fn with_raw_mode<T>(read: impl FnOnce() -> Result<T>) -> Result<T> {
+    terminal::enable_raw_mode()?;
+    let result = read();
+    terminal::disable_raw_mode()?;
+    result
+}
+
+/// Draw the dashboard frame and return how many lines it used. When
+/// `previous_lines` is non-zero the previous frame is cleared first, so
+/// navigation redraws in place without a fullscreen alternate screen and
+/// output stays in normal scrollback.
 fn render_keyboard_menu<W: Write>(
     projects: &[Project],
     doctor: &DoctorReport,
     unused_days: u64,
     selected: usize,
-    first_render: bool,
+    previous_lines: u16,
     output: &mut W,
-) -> Result<()> {
-    if !first_render {
-        execute!(
-            output,
-            MoveUp(KEYBOARD_MENU_LINES),
-            MoveToColumn(0),
-            Clear(ClearType::FromCursorDown)
-        )?;
-    }
+) -> Result<u16> {
     let width = terminal::size()
         .map(|(width, _)| width as usize)
         .unwrap_or(100)
         .max(40);
+    let mut frame = Vec::new();
+    write_frame_header(&mut frame, projects, doctor, unused_days, width)?;
+    write_frame_menu(&mut frame, selected, width)?;
 
+    if previous_lines > 0 {
+        execute!(
+            output,
+            MoveUp(previous_lines),
+            MoveToColumn(0),
+            Clear(ClearType::FromCursorDown)
+        )?;
+    }
+    output.write_all(&frame)?;
+    output.flush()?;
+    Ok(line_count(&frame))
+}
+
+fn line_count(frame: &[u8]) -> u16 {
+    let lines = frame.iter().filter(|byte| **byte == b'\n').count();
+    u16::try_from(lines).unwrap_or(u16::MAX)
+}
+
+/// Title and fleet metrics at the top of the frame.
+fn write_frame_header<W: Write>(
+    output: &mut W,
+    projects: &[Project],
+    doctor: &DoctorReport,
+    unused_days: u64,
+    width: usize,
+) -> Result<()> {
     let summary = summarize_fleet(projects);
     let largest = doctor
         .largest_project
@@ -176,7 +197,11 @@ fn render_keyboard_menu<W: Write>(
         width,
     )?;
     write_menu_line(output, "", width)?;
+    Ok(())
+}
 
+/// Action list with the selected row highlighted, plus the key legend.
+fn write_frame_menu<W: Write>(output: &mut W, selected: usize, width: usize) -> Result<()> {
     for (index, (label, description)) in KEYBOARD_ACTIONS.iter().enumerate() {
         let line = format!(
             "{}. {:<18} {}",
@@ -205,7 +230,6 @@ fn render_keyboard_menu<W: Write>(
         "Keys: Up/Down or j/k move | Enter open | 1-5 direct | r refresh | q quit",
         width,
     )?;
-    output.flush()?;
     Ok(())
 }
 
@@ -213,33 +237,51 @@ fn render_keyboard_menu<W: Write>(
 /// over `KEYBOARD_ACTIONS`.
 fn read_menu_action(selected: &mut usize) -> Result<MenuAction> {
     loop {
-        match read_key_code()? {
-            KeyCode::Char('q') | KeyCode::Esc => return Ok(MenuAction::Quit),
-            KeyCode::Char('r') => return Ok(MenuAction::Refresh),
-            KeyCode::Char(value @ '1'..='5') => {
-                return Ok(MenuAction::Open(value as usize - '1' as usize));
-            }
-            KeyCode::Enter => return Ok(MenuAction::Open(*selected)),
-            KeyCode::Up | KeyCode::Char('k') => {
-                *selected = selected.saturating_sub(1);
-                return Ok(MenuAction::Redraw);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if *selected + 1 < KEYBOARD_ACTIONS.len() {
-                    *selected += 1;
-                }
-                return Ok(MenuAction::Redraw);
-            }
-            _ => {}
+        if let Some(action) = menu_action_for(read_key()?, selected) {
+            return Ok(action);
         }
     }
 }
 
-/// Read one keypress; ignore non-key events.
-fn read_key_code() -> Result<KeyCode> {
+/// Map one keypress to a menu action, moving `selected` for navigation
+/// keys. Returns `None` for keys the menu ignores.
+fn menu_action_for(key: KeyEvent, selected: &mut usize) -> Option<MenuAction> {
+    if is_quit_key(key) {
+        return Some(MenuAction::Quit);
+    }
+    match key.code {
+        KeyCode::Char('r') => Some(MenuAction::Refresh),
+        KeyCode::Char(value @ '1'..='5') => Some(MenuAction::Open(value as usize - '1' as usize)),
+        KeyCode::Enter => Some(MenuAction::Open(*selected)),
+        KeyCode::Up | KeyCode::Char('k') => {
+            *selected = selected.saturating_sub(1);
+            Some(MenuAction::Redraw)
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if *selected + 1 < KEYBOARD_ACTIONS.len() {
+                *selected += 1;
+            }
+            Some(MenuAction::Redraw)
+        }
+        _ => None,
+    }
+}
+
+/// `q`, Esc, and Ctrl-C quit. Raw mode delivers Ctrl-C as a key event
+/// instead of SIGINT, so it has to be handled here.
+fn is_quit_key(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
+        || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+}
+
+/// Block until a key is pressed. Key-release events (reported on Windows)
+/// and non-key events are ignored so one physical press is handled once.
+fn read_key() -> Result<KeyEvent> {
     loop {
-        if let Event::Key(key) = event::read()? {
-            return Ok(key.code);
+        if let Event::Key(key) = event::read()?
+            && key.kind != KeyEventKind::Release
+        {
+            return Ok(key);
         }
     }
 }
@@ -261,5 +303,85 @@ fn run_menu_action(
         3 => print_clean_dry_run(projects, &mut input, &mut output),
         4 => print_restore_command(projects, &mut input, &mut output),
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn frame_line_count_matches_what_is_drawn() {
+        // The redraw rewinds by the counted lines; a hard-coded count that
+        // drifted from the real frame made the menu creep down one line per
+        // keypress.
+        let mut frame = Vec::new();
+        write_frame_header(&mut frame, &[], &DoctorReport::default(), 90, 100).unwrap();
+        write_frame_menu(&mut frame, 0, 100).unwrap();
+        let text = String::from_utf8_lossy(&frame).to_string();
+        assert_eq!(usize::from(line_count(&frame)), text.lines().count());
+        assert_eq!(line_count(&frame), 14);
+    }
+
+    #[test]
+    fn frame_highlights_exactly_the_selected_action() {
+        let mut frame = Vec::new();
+        write_frame_menu(&mut frame, 2, 100).unwrap();
+        let text = String::from_utf8_lossy(&frame).to_string();
+        let marked: Vec<&str> = text.lines().filter(|line| line.contains("> ")).collect();
+        assert_eq!(marked.len(), 1);
+        assert!(marked[0].contains("3. GC dry-run"));
+    }
+
+    #[test]
+    fn navigation_keys_move_within_bounds() {
+        let mut selected = 0;
+        assert_eq!(
+            menu_action_for(press(KeyCode::Up), &mut selected),
+            Some(MenuAction::Redraw)
+        );
+        assert_eq!(selected, 0);
+        for _ in 0..10 {
+            menu_action_for(press(KeyCode::Char('j')), &mut selected);
+        }
+        assert_eq!(selected, KEYBOARD_ACTIONS.len() - 1);
+        assert_eq!(
+            menu_action_for(press(KeyCode::Enter), &mut selected),
+            Some(MenuAction::Open(KEYBOARD_ACTIONS.len() - 1))
+        );
+    }
+
+    #[test]
+    fn digits_refresh_and_unknown_keys() {
+        let mut selected = 0;
+        assert_eq!(
+            menu_action_for(press(KeyCode::Char('3')), &mut selected),
+            Some(MenuAction::Open(2))
+        );
+        assert_eq!(
+            menu_action_for(press(KeyCode::Char('r')), &mut selected),
+            Some(MenuAction::Refresh)
+        );
+        assert_eq!(
+            menu_action_for(press(KeyCode::Char('6')), &mut selected),
+            None
+        );
+        assert_eq!(
+            menu_action_for(press(KeyCode::Char('x')), &mut selected),
+            None
+        );
+    }
+
+    #[test]
+    fn ctrl_c_quits_but_plain_c_does_not() {
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(is_quit_key(ctrl_c));
+        assert!(is_quit_key(press(KeyCode::Char('q'))));
+        assert!(is_quit_key(press(KeyCode::Esc)));
+        assert!(!is_quit_key(press(KeyCode::Char('c'))));
     }
 }

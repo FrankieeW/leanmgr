@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use serde::Serialize;
+use std::io::{self, Write};
 
 /// Print a serializable value as pretty JSON.
 pub fn print_json<T: Serialize>(value: &T) -> Result<()> {
@@ -9,31 +10,68 @@ pub fn print_json<T: Serialize>(value: &T) -> Result<()> {
     Ok(())
 }
 
-/// Print a simple table.
+/// Print a simple table to stdout.
 pub fn print_table(headers: &[&str], rows: &[Vec<String>]) {
-    let mut widths: Vec<usize> = headers.iter().map(|header| header.len()).collect();
+    // Writing to stdout only fails when the reader went away (e.g. a closed
+    // pipe); there is nobody left to report that to.
+    let _ = write_table(&mut io::stdout().lock(), headers, rows);
+}
+
+/// Write a table with left-aligned, space-separated columns.
+///
+/// Widths are measured in characters, matching how `{:width$}` pads. The
+/// last column is not padded so lines carry no trailing whitespace.
+pub fn write_table<W: Write>(
+    output: &mut W,
+    headers: &[&str],
+    rows: &[Vec<String>],
+) -> io::Result<()> {
+    let mut widths: Vec<usize> = headers
+        .iter()
+        .map(|header| header.chars().count())
+        .collect();
     for row in rows {
         for (index, cell) in row.iter().enumerate() {
-            widths[index] = widths[index].max(cell.len());
+            widths[index] = widths[index].max(cell.chars().count());
         }
     }
 
-    for (index, header) in headers.iter().enumerate() {
-        print!("{header:width$}", width = widths[index]);
-        if index + 1 < headers.len() {
-            print!("  ");
+    write_row(output, headers, &widths)?;
+    for row in rows {
+        let cells: Vec<&str> = row.iter().map(String::as_str).collect();
+        write_row(output, &cells, &widths)?;
+    }
+    Ok(())
+}
+
+fn write_row<W: Write>(output: &mut W, cells: &[&str], widths: &[usize]) -> io::Result<()> {
+    for (index, cell) in cells.iter().enumerate() {
+        if index + 1 < cells.len() {
+            write!(output, "{cell:width$}  ", width = widths[index])?;
+        } else {
+            write!(output, "{cell}")?;
         }
     }
-    println!();
+    writeln!(output)
+}
 
-    for row in rows {
-        for (index, cell) in row.iter().enumerate() {
-            print!("{cell:width$}", width = widths[index]);
-            if index + 1 < row.len() {
-                print!("  ");
-            }
-        }
-        println!();
+/// Describe how long ago a stored epoch-seconds timestamp was, such as
+/// `5m ago` or `3d ago`. Values that are not epoch seconds are returned
+/// unchanged.
+pub fn format_age(stored: &str, now: u64) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    let Ok(then) = stored.trim().parse::<u64>() else {
+        return stored.to_string();
+    };
+    match now.saturating_sub(then) {
+        elapsed if elapsed < MINUTE => "just now".to_string(),
+        elapsed if elapsed < HOUR => format!("{}m ago", elapsed / MINUTE),
+        elapsed if elapsed < DAY => format!("{}h ago", elapsed / HOUR),
+        elapsed if elapsed < 30 * DAY => format!("{}d ago", elapsed / DAY),
+        elapsed if elapsed < 365 * DAY => format!("{}mo ago", elapsed / (30 * DAY)),
+        elapsed => format!("{}y ago", elapsed / (365 * DAY)),
     }
 }
 
@@ -119,6 +157,58 @@ mod tests {
         assert_eq!(parse_bytes("2GB").unwrap(), 2 * 1024 * 1024 * 1024);
         assert!(parse_bytes("abc").is_err());
         assert!(parse_bytes("").is_err());
+    }
+
+    #[test]
+    fn write_table_aligns_columns_without_trailing_space() {
+        let mut out = Vec::new();
+        write_table(
+            &mut out,
+            &["NAME", "SIZE"],
+            &[
+                vec!["a".to_string(), "1 B".to_string()],
+                vec!["longer".to_string(), "2.0 KiB".to_string()],
+            ],
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text, "NAME    SIZE\na       1 B\nlonger  2.0 KiB\n");
+    }
+
+    #[test]
+    fn write_table_pads_by_characters_not_bytes() {
+        // "数学" is 6 bytes but 2 characters; padding by byte length
+        // would push the next column 4 columns too far right.
+        let mut out = Vec::new();
+        write_table(
+            &mut out,
+            &["NAME", "TAGS"],
+            &[vec!["数学".to_string(), "x".to_string()]],
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text, "NAME  TAGS\n数学    x\n");
+    }
+
+    #[test]
+    fn format_age_buckets_elapsed_time() {
+        let now = 1_000_000_000;
+        assert_eq!(format_age(&now.to_string(), now), "just now");
+        assert_eq!(format_age(&(now - 59).to_string(), now), "just now");
+        assert_eq!(format_age(&(now - 5 * 60).to_string(), now), "5m ago");
+        assert_eq!(format_age(&(now - 3 * 3600).to_string(), now), "3h ago");
+        assert_eq!(format_age(&(now - 2 * 86_400).to_string(), now), "2d ago");
+        assert_eq!(format_age(&(now - 90 * 86_400).to_string(), now), "3mo ago");
+        assert_eq!(format_age(&(now - 800 * 86_400).to_string(), now), "2y ago");
+    }
+
+    #[test]
+    fn format_age_tolerates_clock_skew_and_foreign_values() {
+        assert_eq!(format_age("2000", 1000), "just now");
+        assert_eq!(
+            format_age("2026-06-07T00:00:00Z", 0),
+            "2026-06-07T00:00:00Z"
+        );
     }
 
     #[test]

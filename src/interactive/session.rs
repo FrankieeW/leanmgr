@@ -50,28 +50,43 @@ pub fn run_session<R: BufRead, W: Write>(
         return Ok(());
     }
 
+    // Building the report walks every `.lake`, so it is computed once and
+    // rebuilt only when the user asks for a refresh.
+    let mut doctor = build_doctor_report(projects, unused_days)?;
     loop {
-        let doctor = build_doctor_report(projects, unused_days)?;
         print_dashboard(projects, &doctor, unused_days, output)?;
         print_menu(output)?;
-        let choice = prompt("Choose an action", &mut input, output)?;
+        let Some(choice) = prompt("Choose an action", &mut input, output)? else {
+            break;
+        };
 
-        match choice.trim() {
-            "1" => print_project_list(projects, output)?,
-            "2" => print_doctor_summary(&doctor, unused_days, output)?,
-            "3" => print_gc_dry_run(projects, unused_days, output)?,
-            "4" => print_clean_dry_run(projects, &mut input, output)?,
-            "5" => print_restore_command(projects, &mut input, output)?,
-            "6" => continue,
-            "q" | "Q" | "quit" | "exit" => {
-                writeln!(output, "Done.")?;
-                break;
+        let result = match choice.trim() {
+            "1" => print_project_list(projects, output),
+            "2" => print_doctor_summary(&doctor, unused_days, output),
+            "3" => print_gc_dry_run(projects, unused_days, output),
+            "4" => print_clean_dry_run(projects, &mut input, output),
+            "5" => print_restore_command(projects, &mut input, output),
+            "6" => {
+                doctor = build_doctor_report(projects, unused_days)?;
+                continue;
             }
-            other => writeln!(output, "Unknown action: {other}")?,
+            "q" | "Q" | "quit" | "exit" => break,
+            other => {
+                writeln!(output, "Unknown action: {other}")?;
+                Ok(())
+            }
+        };
+        // A bad answer inside an action (unknown project, mistyped level)
+        // is reported and the menu shown again instead of ending the session.
+        if let Err(error) = result {
+            writeln!(output, "Error: {error:#}")?;
         }
 
-        let _ = prompt("Press Enter to continue", &mut input, output)?;
+        if prompt("Press Enter to continue", &mut input, output)?.is_none() {
+            break;
+        }
     }
 
+    writeln!(output, "Done.")?;
     Ok(())
 }

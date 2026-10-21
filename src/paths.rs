@@ -42,10 +42,15 @@ pub fn display_path(path: &Path) -> String {
 
 /// Return a simple UTC-ish timestamp string as seconds since epoch.
 pub fn now_string() -> String {
+    now_secs().to_string()
+}
+
+/// Return the current time as seconds since the Unix epoch.
+pub fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs().to_string())
-        .unwrap_or_else(|_| "0".to_string())
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn home_dir() -> Result<PathBuf> {

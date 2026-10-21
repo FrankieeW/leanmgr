@@ -7,6 +7,7 @@ use crate::cli::{
 use crate::config::load_config;
 use crate::output::{format_bytes, print_json};
 use crate::project::{Project, filter_by_tag};
+use crate::prompt::confirm;
 use crate::size::{ProjectSize, project_size};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
@@ -173,9 +174,10 @@ fn build_context(projects: &[&Project]) -> Result<AiProjectContext> {
         ],
         recommended_workflow: vec![
             "Run leanmgr size or doctor to identify candidates.",
-            "Run leanmgr clean with --dry-run before deletion.",
+            "Run leanmgr clean or leanmgr gc with --dry-run before deletion.",
             "Use leanmgr gitignore to ensure .lake/ is ignored.",
-            "Use leanmgr restore to call lake exe cache get when returning to a project.",
+            "Use leanmgr restore (preview with --dry-run) to call lake exe cache get when returning to a project.",
+            "Use leanmgr remove --missing --dry-run to find index entries whose path is gone.",
         ],
     })
 }
@@ -273,16 +275,6 @@ fn print_fallbacks(target: AiSkillTarget) {
         println!("  claude-code: {CLAUDE_SKILL_URL}");
         println!("    local: leanmgr ai skill show {LEANMGR_SKILL_NAME} --format claude");
     }
-}
-
-fn confirm(prompt: &str) -> Result<bool> {
-    print!("{prompt} [y/N] ");
-    io::stdout().flush()?;
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .context("failed to read confirmation")?;
-    Ok(matches!(input.trim(), "y" | "Y" | "yes" | "YES"))
 }
 
 fn read_skill_file() -> Result<String> {

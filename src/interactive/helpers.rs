@@ -8,16 +8,22 @@ use anyhow::{Result, bail};
 use std::io::{BufRead, Write};
 
 /// Read one line of input from the user, prefixed with `label> `.
+///
+/// Returns `None` at end of input so callers can stop instead of looping
+/// on an endless stream of empty answers (e.g. `lm < /dev/null`).
 pub(super) fn prompt<R: BufRead, W: Write>(
     label: &str,
     input: &mut R,
     output: &mut W,
-) -> Result<String> {
+) -> Result<Option<String>> {
     write!(output, "{label}> ")?;
     output.flush()?;
     let mut value = String::new();
-    input.read_line(&mut value)?;
-    Ok(value)
+    if input.read_line(&mut value)? == 0 {
+        writeln!(output)?;
+        return Ok(None);
+    }
+    Ok(Some(value))
 }
 
 /// Print a section heading with a rule underneath. Used at the top of
@@ -45,38 +51,13 @@ pub(super) fn write_name_list<W: Write>(
     Ok(())
 }
 
-/// Render a 2-column table of `headers` + `rows`, padding each cell so
-/// columns line up. Mirrors `crate::output::print_table` but takes a
-/// `Write` so it works inside the interactive session writers.
+/// Render `headers` + `rows` as an aligned table on the session writer.
 pub(super) fn print_table_to<W: Write>(
     output: &mut W,
     headers: &[&str],
     rows: &[Vec<String>],
 ) -> Result<()> {
-    let mut widths: Vec<usize> = headers.iter().map(|header| header.len()).collect();
-    for row in rows {
-        for (index, cell) in row.iter().enumerate() {
-            widths[index] = widths[index].max(cell.len());
-        }
-    }
-
-    for (index, header) in headers.iter().enumerate() {
-        write!(output, "{header:width$}", width = widths[index])?;
-        if index + 1 < headers.len() {
-            write!(output, "  ")?;
-        }
-    }
-    writeln!(output)?;
-
-    for row in rows {
-        for (index, cell) in row.iter().enumerate() {
-            write!(output, "{cell:width$}", width = widths[index])?;
-            if index + 1 < row.len() {
-                write!(output, "  ")?;
-            }
-        }
-        writeln!(output)?;
-    }
+    crate::output::write_table(output, headers, rows)?;
     Ok(())
 }
 

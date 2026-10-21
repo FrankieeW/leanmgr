@@ -1,6 +1,7 @@
 //! Command line interface definitions.
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
 
 /// Manage disposable `.lake` cache state across many Lean 4 projects.
 #[derive(Debug, Parser)]
@@ -24,7 +25,7 @@ pub enum Commands {
     Init,
     /// Add a Lake project to the project index.
     Add(AddArgs),
-    /// Remove a project record without deleting source files.
+    /// Remove project records without deleting source files.
     Remove(RemoveArgs),
     /// List indexed projects.
     List(ListArgs),
@@ -62,6 +63,16 @@ pub enum Commands {
         #[command(subcommand)]
         command: WorktreeCommands,
     },
+    /// Print a shell completion script to stdout.
+    Completions(CompletionsArgs),
+}
+
+/// Arguments for `leanmgr completions`.
+#[derive(Debug, Args)]
+pub struct CompletionsArgs {
+    /// Shell to generate completions for.
+    #[arg(value_enum)]
+    pub shell: Shell,
 }
 
 /// AI subcommands.
@@ -178,7 +189,17 @@ pub struct AddArgs {
 #[derive(Debug, Args)]
 pub struct RemoveArgs {
     /// Project name or path.
-    pub project: String,
+    #[arg(required_unless_present = "missing", conflicts_with = "missing")]
+    pub project: Option<String>,
+    /// Remove every project whose path no longer exists.
+    #[arg(long)]
+    pub missing: bool,
+    /// Print what would be removed without changing the index.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Skip the confirmation prompt for `--missing`.
+    #[arg(long)]
+    pub force: bool,
 }
 
 /// Arguments for `leanmgr list`.
@@ -335,6 +356,9 @@ pub struct RestoreArgs {
     /// Select all projects.
     #[arg(long)]
     pub all: bool,
+    /// Print which projects would be restored or skipped without running Lake.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Tag subcommands.

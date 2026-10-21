@@ -2,13 +2,13 @@
 
 use crate::cli::DoctorArgs;
 use crate::config::load_config;
+use crate::lake::{has_lakefile, read_toolchain};
 use crate::output::{format_bytes, print_json};
 use crate::project::Project;
 use crate::size::{ProjectSize, project_size};
 use anyhow::Result;
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::fs;
 use std::time::{Duration, SystemTime};
 
 /// Doctor report.
@@ -80,7 +80,28 @@ pub fn doctor_command(args: DoctorArgs) -> Result<()> {
         }
     }
 
+    for hint in doctor_hints(&report, args.unused_days) {
+        println!("Hint: {hint}");
+    }
+
     Ok(())
+}
+
+/// Next-step suggestions for the problems a report found.
+fn doctor_hints(report: &DoctorReport, unused_days: u64) -> Vec<String> {
+    let mut hints = Vec::new();
+    if !report.unused_projects.is_empty() {
+        hints.push(format!(
+            "`leanmgr gc --unused-days {unused_days} --dry-run` previews reclaiming the unused caches."
+        ));
+    }
+    if !report.missing_paths.is_empty() {
+        hints.push(
+            "`leanmgr remove --missing` drops index entries whose path is gone (source is never touched)."
+                .to_string(),
+        );
+    }
+    hints
 }
 
 /// Build doctor diagnostics from projects.
@@ -94,7 +115,7 @@ pub fn build_doctor_report(projects: &[Project], unused_days: u64) -> Result<Doc
             report.missing_paths.push(project.name.clone());
             continue;
         }
-        if !root.join("lakefile.toml").exists() && !root.join("lakefile.lean").exists() {
+        if !has_lakefile(&root) {
             report.missing_lake_files.push(project.name.clone());
         }
 
@@ -112,7 +133,7 @@ pub fn build_doctor_report(projects: &[Project], unused_days: u64) -> Result<Doc
             report.unused_projects.push(size);
         }
 
-        let toolchain = read_toolchain(project).unwrap_or_else(|| "missing".to_string());
+        let toolchain = read_toolchain(&root).unwrap_or_else(|| "missing".to_string());
         *report.toolchains.entry(toolchain).or_insert(0) += 1;
     }
 
@@ -160,21 +181,25 @@ pub(crate) fn is_unused(path: &std::path::Path, cutoff: SystemTime) -> Result<bo
     Ok(latest < cutoff)
 }
 
-fn read_toolchain(project: &Project) -> Option<String> {
-    let content = fs::read_to_string(project.expanded_path().join("lean-toolchain")).ok()?;
-    let value = content.lines().next()?.trim();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value.to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn hints_follow_findings() {
+        let mut report = DoctorReport::default();
+        assert!(doctor_hints(&report, 90).is_empty());
+
+        report.missing_paths.push("gone".to_string());
+        report.unused_projects.push(ProjectSize::default());
+        let hints = doctor_hints(&report, 30);
+        assert_eq!(hints.len(), 2);
+        assert!(hints[0].contains("gc --unused-days 30 --dry-run"));
+        assert!(hints[1].contains("remove --missing"));
+    }
 
     fn tmp(name: &str) -> PathBuf {
         let nonce = SystemTime::now()

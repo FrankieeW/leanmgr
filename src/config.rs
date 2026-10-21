@@ -5,6 +5,7 @@ use crate::project::Project;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::path::Path;
 
 /// On-disk configuration schema.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -31,16 +32,7 @@ pub fn init_config() -> Result<()> {
         bail!("config already exists at {}", path.display());
     }
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-
-    let config = Config::default();
-    let content = serde_json::to_string_pretty(&config)?;
-    fs::write(&path, format!("{content}\n"))
-        .with_context(|| format!("failed to write {}", path.display()))?;
-
+    write_config_to(&path, &Config::default())?;
     println!("Created {}", path.display());
     Ok(())
 }
@@ -64,14 +56,27 @@ pub fn load_config() -> Result<Config> {
 
 /// Save configuration to the default path.
 pub fn save_config(config: &Config) -> Result<()> {
-    let path = config_file()?;
+    write_config_to(&config_file()?, config)
+}
+
+/// Write `config` to `path` atomically.
+///
+/// The JSON is written to a sibling temporary file and renamed over the
+/// target, so an interrupted save (Ctrl-C, full disk, crash) leaves the
+/// previous index intact instead of a truncated `config.json`.
+fn write_config_to(path: &Path, config: &Config) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let content = serde_json::to_string_pretty(config)?;
-    fs::write(&path, format!("{content}\n"))
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    fs::write(&tmp, format!("{content}\n"))
+        .with_context(|| format!("failed to write {}", tmp.display()))?;
+    if let Err(error) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error).with_context(|| format!("failed to replace {}", path.display()));
+    }
     Ok(())
 }
 
@@ -127,6 +132,40 @@ mod tests {
             config.projects[0].last_committed_at.as_deref(),
             Some("1700000000")
         );
+    }
+
+    #[test]
+    fn write_config_to_replaces_file_and_leaves_no_temp_files() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("leanmgr-config-atomic-{nonce}"));
+        let path = dir.join("leanmgr").join("config.json");
+
+        write_config_to(&path, &Config::default()).unwrap();
+        let mut config = Config::default();
+        config.projects.push(crate::project::Project {
+            name: "demo".to_string(),
+            path: "/tmp/demo".to_string(),
+            tags: Vec::new(),
+            description: None,
+            added_at: None,
+            last_seen_at: None,
+            last_committed_at: None,
+            size_cache: None,
+        });
+        write_config_to(&path, &config).unwrap();
+
+        let loaded: Config = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(loaded.projects.len(), 1);
+        let entries: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("config.json")]);
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Loading the shipped example config must succeed with the current

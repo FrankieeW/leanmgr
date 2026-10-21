@@ -4,11 +4,10 @@ use crate::cli::SizeArgs;
 use crate::config::load_config;
 use crate::output::{format_bytes, print_json, print_table};
 use crate::project::{Project, filter_by_tag, matches_project};
-use anyhow::Result;
+use anyhow::{Result, bail};
 use serde::Serialize;
-use std::fs;
 use std::path::Path;
-use walkdir::WalkDir;
+use walkdir::{DirEntry, WalkDir};
 
 /// Size summary for one project.
 #[derive(Clone, Debug, Default, Serialize)]
@@ -37,15 +36,11 @@ pub struct SizeReport {
 /// Run the size command.
 pub fn size_command(args: SizeArgs) -> Result<()> {
     let config = load_config()?;
-    let selected: Vec<&Project> = if let Some(selector) = args.project.as_deref() {
-        config
-            .projects
-            .iter()
-            .filter(|project| matches_project(project, selector))
-            .collect()
-    } else {
-        filter_by_tag(&config.projects, args.tag.as_deref())
-    };
+    let selected = select_sized(
+        &config.projects,
+        args.project.as_deref(),
+        args.tag.as_deref(),
+    )?;
 
     let mut report = SizeReport::default();
     for project in selected {
@@ -76,6 +71,29 @@ pub fn size_command(args: SizeArgs) -> Result<()> {
     Ok(())
 }
 
+/// Pick the projects a `size` invocation reports on.
+///
+/// A project selector must match an indexed project; an unknown name
+/// fails loudly instead of printing an empty table. Without a selector,
+/// the optional tag filter applies (all projects when absent).
+fn select_sized<'a>(
+    projects: &'a [Project],
+    selector: Option<&str>,
+    tag: Option<&str>,
+) -> Result<Vec<&'a Project>> {
+    let Some(selector) = selector else {
+        return Ok(filter_by_tag(projects, tag));
+    };
+    let matched: Vec<&Project> = projects
+        .iter()
+        .filter(|project| matches_project(project, selector))
+        .collect();
+    if matched.is_empty() {
+        bail!("project not found: {selector}");
+    }
+    Ok(matched)
+}
+
 /// Compute `.lake`-related size for one project.
 ///
 /// Walks `.lake` once and buckets bytes by subtree. `build` and `packages` are
@@ -92,12 +110,7 @@ pub fn project_size(project: &Project) -> Result<ProjectSize> {
     let mut packages_size = 0;
 
     if lake.exists() {
-        for entry in WalkDir::new(&lake).follow_links(false) {
-            let entry = entry?;
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let len = fs::metadata(entry.path())?.len();
+        for (entry, len) in files_with_sizes(&lake) {
             lake_size += len;
             if entry.path().starts_with(&build) {
                 build_size += len;
@@ -121,20 +134,95 @@ pub fn dir_size(path: &Path) -> Result<u64> {
     if !path.exists() {
         return Ok(0);
     }
-    let mut total = 0;
-    for entry in WalkDir::new(path).follow_links(false) {
-        let entry = entry?;
-        if entry.file_type().is_file() {
-            total += fs::metadata(entry.path())?.len();
-        }
-    }
-    Ok(total)
+    Ok(files_with_sizes(path).map(|(_, len)| len).sum())
+}
+
+/// Iterate regular files under `root` with their sizes, without following
+/// symlinks.
+///
+/// Entries that vanish or cannot be read mid-walk are skipped rather than
+/// aborting the report: a concurrent `lake build` routinely creates and
+/// deletes temporary files under `.lake` while it runs.
+fn files_with_sizes(root: &Path) -> impl Iterator<Item = (DirEntry, u64)> {
+    WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .filter_map(|entry| {
+            let len = entry.metadata().ok()?.len();
+            Some((entry, len))
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn named(name: &str) -> Project {
+        Project {
+            name: name.to_string(),
+            path: format!("/tmp/{name}"),
+            tags: vec!["active".to_string()],
+            description: None,
+            added_at: None,
+            last_seen_at: None,
+            last_committed_at: None,
+            size_cache: None,
+        }
+    }
+
+    #[test]
+    fn unknown_size_selector_fails_loudly() {
+        let projects = vec![named("demo")];
+        let error = select_sized(&projects, Some("nope"), None).unwrap_err();
+        assert!(error.to_string().contains("project not found: nope"));
+        assert_eq!(
+            select_sized(&projects, Some("demo"), None).unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn size_without_selector_uses_tag_filter() {
+        let projects = vec![named("demo")];
+        assert_eq!(select_sized(&projects, None, None).unwrap().len(), 1);
+        assert_eq!(
+            select_sized(&projects, None, Some("active")).unwrap().len(),
+            1
+        );
+        assert!(
+            select_sized(&projects, None, Some("other"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dir_size_skips_unreadable_subtrees() {
+        use std::os::unix::fs::PermissionsExt;
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("leanmgr-size-locked-{nonce}"));
+        fs::create_dir_all(root.join("locked")).unwrap();
+        fs::write(root.join("visible"), b"abcd").unwrap();
+        fs::write(root.join("locked/hidden"), b"zz").unwrap();
+        fs::set_permissions(root.join("locked"), fs::Permissions::from_mode(0o000)).unwrap();
+
+        let size = dir_size(&root);
+
+        fs::set_permissions(root.join("locked"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        // Running as root bypasses the permission bits, so the locked file
+        // may still be counted; either way the walk must not error.
+        let size = size.expect("an unreadable subtree must not abort the walk");
+        assert!(size == 4 || size == 6, "unexpected size {size}");
+    }
 
     #[test]
     fn project_size_buckets_build_and_packages_in_one_pass() {

@@ -1,8 +1,8 @@
 //! Core library for the LeanMgr command line tool.
 
 use anyhow::Result;
-use clap::Parser;
-use cli::{Cli, Commands, InteractArgs, TagCommands, WorktreeCommands};
+use clap::{CommandFactory, Parser};
+use cli::{Cli, Commands, CompletionsArgs, InteractArgs, TagCommands, WorktreeCommands};
 
 pub mod ai;
 pub mod clean;
@@ -13,10 +13,12 @@ pub mod doctor;
 pub mod gc;
 pub mod gitignore;
 pub mod interactive;
+pub mod lake;
 pub mod output;
 pub mod paths;
 pub mod process;
 pub mod project;
+pub mod prompt;
 pub mod recover;
 pub mod restore;
 pub mod size;
@@ -57,5 +59,14 @@ pub fn run_cli() -> Result<()> {
             WorktreeCommands::Doctor(args) => worktree::doctor_worktrees(args),
             WorktreeCommands::Prune(args) => worktree::prune_worktrees(args),
         },
+        Some(Commands::Completions(args)) => completions_command(args),
     }
+}
+
+/// Print a completion script for `leanmgr` in the requested shell.
+fn completions_command(args: CompletionsArgs) -> Result<()> {
+    let mut command = Cli::command();
+    let name = command.get_name().to_string();
+    clap_complete::generate(args.shell, &mut command, name, &mut std::io::stdout());
+    Ok(())
 }

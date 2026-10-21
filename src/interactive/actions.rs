@@ -186,7 +186,8 @@ pub(super) fn choose_project<'a, R: BufRead, W: Write>(
     output: &mut W,
 ) -> Result<&'a Project> {
     print_project_list(projects, output)?;
-    let selector = prompt("Project number or name", input, output)?;
+    let selector = prompt("Project number or name", input, output)?
+        .context("no project selected (end of input)")?;
     let trimmed = selector.trim();
     if let Ok(index) = trimmed.parse::<usize>() {
         if index == 0 {
@@ -208,6 +209,7 @@ pub(super) fn choose_clean_level<R: BufRead, W: Write>(
     output: &mut W,
 ) -> Result<CleanLevel> {
     writeln!(output, "Clean levels: soft, deps-build, hard")?;
-    let level = prompt("Clean level", input, output)?;
+    let level =
+        prompt("Clean level", input, output)?.context("no clean level selected (end of input)")?;
     parse_clean_level(level.trim())
 }

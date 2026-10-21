@@ -2,8 +2,10 @@
 
 use crate::cli::{AddArgs, ListArgs, RemoveArgs};
 use crate::config::{load_config, save_config};
-use crate::output::{print_json, print_table};
-use crate::paths::{display_path, expand_tilde, normalize_existing_or_join, now_string};
+use crate::lake::has_lakefile;
+use crate::output::{format_age, format_bytes, print_json, print_table};
+use crate::paths::{display_path, expand_tilde, normalize_existing_or_join, now_secs, now_string};
+use crate::prompt::confirm;
 use crate::size::{ProjectSize, project_size};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -123,19 +125,91 @@ pub fn add_project(args: AddArgs) -> Result<()> {
     Ok(())
 }
 
-/// Remove a project record without deleting source files.
+/// Remove project records without deleting source files.
 pub fn remove_project(args: RemoveArgs) -> Result<()> {
+    if args.missing {
+        return remove_missing_projects(args.dry_run, args.force);
+    }
+    let selector = args
+        .project
+        .as_deref()
+        .context("select a project or pass --missing")?;
     let mut config = load_config()?;
-    let before = config.projects.len();
+    let matched: Vec<&Project> = config
+        .projects
+        .iter()
+        .filter(|project| matches_project(project, selector))
+        .collect();
+    if matched.is_empty() {
+        bail!("project not found: {selector}");
+    }
+    if args.dry_run {
+        for project in matched {
+            println!("Would remove {}  {}", project.name, project.path);
+        }
+        return Ok(());
+    }
     config
         .projects
-        .retain(|project| !matches_project(project, &args.project));
-    if config.projects.len() == before {
-        bail!("project not found: {}", args.project);
-    }
+        .retain(|project| !matches_project(project, selector));
     save_config(&config)?;
-    println!("Removed {}", args.project);
+    println!("Removed {selector}");
     Ok(())
+}
+
+/// Drop every index entry whose path no longer exists.
+///
+/// Only `config.json` changes; nothing on disk is deleted. The list is
+/// confirmed first because a project on an unmounted drive also looks
+/// missing, and removing it would lose its tags and description.
+fn remove_missing_projects(dry_run: bool, force: bool) -> Result<()> {
+    let mut config = load_config()?;
+    let missing = missing_entries(&config.projects);
+    if missing.is_empty() {
+        println!("Every indexed project path exists; nothing to remove.");
+        return Ok(());
+    }
+
+    println!("Projects whose path no longer exists:");
+    let rows: Vec<Vec<String>> = missing
+        .iter()
+        .map(|(name, path)| vec![name.clone(), path.clone()])
+        .collect();
+    print_table(&["NAME", "PATH"], &rows);
+    if dry_run {
+        println!("Dry run: the index was not changed.");
+        return Ok(());
+    }
+    if !force {
+        println!(
+            "Paths on an unmounted drive also look missing. Source directories are never touched."
+        );
+        if !confirm(&format!(
+            "Remove {} project(s) from the index?",
+            missing.len()
+        ))? {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    config.projects.retain(|project| {
+        !missing
+            .iter()
+            .any(|(name, path)| *name == project.name && *path == project.path)
+    });
+    save_config(&config)?;
+    println!("Removed {} project(s) from the index.", missing.len());
+    Ok(())
+}
+
+/// Return `(name, path)` for each project whose path does not exist.
+fn missing_entries(projects: &[Project]) -> Vec<(String, String)> {
+    projects
+        .iter()
+        .filter(|project| !project.expanded_path().exists())
+        .map(|project| (project.name.clone(), project.path.clone()))
+        .collect()
 }
 
 /// List configured projects.
@@ -151,19 +225,41 @@ pub fn list_projects(args: ListArgs) -> Result<()> {
         return print_json(&projects);
     }
 
-    let mut rows = Vec::new();
-    for project in projects {
-        let (size, computed_at) = cached_size_cells(project);
-        rows.push(vec![
-            project.name.clone(),
-            project.path.clone(),
-            project.tags.join(","),
-            size,
-            computed_at,
-        ]);
+    let now = now_secs();
+    let rows: Vec<Vec<String>> = projects
+        .iter()
+        .map(|project| list_row(project, now))
+        .collect();
+    print_table(
+        &["NAME", "STATUS", "SIZE", "MEASURED", "TAGS", "PATH"],
+        &rows,
+    );
+    let missing = rows.iter().filter(|row| row[1] == STATUS_MISSING).count();
+    if missing > 0 {
+        println!(
+            "{missing} project path(s) no longer exist; `leanmgr remove --missing` drops them from the index."
+        );
     }
-    print_table(&["NAME", "PATH", "TAGS", "SIZE", "SIZE_AT"], &rows);
     Ok(())
+}
+
+const STATUS_MISSING: &str = "missing";
+
+fn list_row(project: &Project, now: u64) -> Vec<String> {
+    let status = if project.expanded_path().exists() {
+        "ok"
+    } else {
+        STATUS_MISSING
+    };
+    let (size, measured) = cached_size_cells(project, now);
+    vec![
+        project.name.clone(),
+        status.to_string(),
+        size,
+        measured,
+        project.tags.join(","),
+        project.path.clone(),
+    ]
 }
 
 fn refresh_size_cache(projects: &mut [Project], tag: Option<&str>) -> Result<()> {
@@ -177,14 +273,14 @@ fn refresh_size_cache(projects: &mut [Project], tag: Option<&str>) -> Result<()>
     Ok(())
 }
 
-fn cached_size_cells(project: &Project) -> (String, String) {
+fn cached_size_cells(project: &Project, now: u64) -> (String, String) {
     project
         .size_cache
         .as_ref()
         .map(|cache| {
             (
-                crate::output::format_bytes(cache.total),
-                cache.computed_at.clone(),
+                format_bytes(cache.total),
+                format_age(&cache.computed_at, now),
             )
         })
         .unwrap_or_else(|| ("unknown".to_string(), "never".to_string()))
@@ -237,7 +333,7 @@ fn ensure_selector(project: bool, tag: bool, all: bool) -> Result<()> {
 
 /// Validate that a path contains a Lake file.
 pub fn validate_lake_project(path: &Path) -> Result<()> {
-    if path.join("lakefile.toml").exists() || path.join("lakefile.lean").exists() {
+    if has_lakefile(path) {
         return Ok(());
     }
     bail!(
@@ -271,7 +367,7 @@ mod tests {
     fn cached_size_cells_show_unknown_without_cache() {
         let project = project_with_cache(None);
         assert_eq!(
-            cached_size_cells(&project),
+            cached_size_cells(&project, 0),
             ("unknown".to_string(), "never".to_string())
         );
     }
@@ -286,8 +382,47 @@ mod tests {
             computed_at: "123".to_string(),
         }));
         assert_eq!(
-            cached_size_cells(&project),
-            ("2.0 KiB".to_string(), "123".to_string())
+            cached_size_cells(&project, 123 + 2 * 86_400),
+            ("2.0 KiB".to_string(), "2d ago".to_string())
+        );
+    }
+
+    #[test]
+    fn list_row_flags_missing_paths_and_puts_path_last() {
+        let mut project = project_with_cache(None);
+        project.path = "/nonexistent/leanmgr-list-row".to_string();
+        project.tags = vec!["a".to_string(), "b".to_string()];
+        let row = list_row(&project, 0);
+        assert_eq!(
+            row,
+            vec![
+                "demo".to_string(),
+                STATUS_MISSING.to_string(),
+                "unknown".to_string(),
+                "never".to_string(),
+                "a,b".to_string(),
+                "/nonexistent/leanmgr-list-row".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_entries_only_reports_absent_paths() {
+        let present = std::env::temp_dir();
+        let mut kept = project_with_cache(None);
+        kept.name = "kept".to_string();
+        kept.path = present.display().to_string();
+        let mut gone = project_with_cache(None);
+        gone.name = "gone".to_string();
+        gone.path = "/nonexistent/leanmgr-missing-entry".to_string();
+
+        let missing = missing_entries(&[kept, gone]);
+        assert_eq!(
+            missing,
+            vec![(
+                "gone".to_string(),
+                "/nonexistent/leanmgr-missing-entry".to_string()
+            )]
         );
     }
 

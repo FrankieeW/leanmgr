@@ -1,10 +1,12 @@
 //! Policy-driven, recoverability-checked cache cleanup.
 
-use crate::clean::{CleanTarget, build_clean_plan, confirm_delete, execute_targets};
+use crate::clean::{
+    CleanTarget, build_clean_plan, confirm_delete, execute_targets, print_clean_plan,
+};
 use crate::cli::{CleanLevel, GcArgs};
 use crate::config::load_config;
 use crate::doctor::{is_unused, unused_cutoff};
-use crate::output::{format_bytes, parse_bytes, print_json, print_table};
+use crate::output::{format_bytes, parse_bytes, print_json};
 use crate::project::Project;
 use crate::recover::{Recoverability, assess};
 use anyhow::{Result, bail};
@@ -117,17 +119,21 @@ struct GcReport<'a> {
     executed: bool,
 }
 
+impl From<&GcMode> for GcModeJson {
+    fn from(mode: &GcMode) -> Self {
+        match *mode {
+            GcMode::UnusedDays(days) => Self::UnusedDays { unused_days: days },
+            GcMode::Target(bytes) => Self::Target {
+                target_bytes: bytes,
+            },
+        }
+    }
+}
+
 /// Run the gc command: select by policy, report, confirm, and delete.
 pub fn gc_command(args: GcArgs) -> Result<()> {
-    let mode = match (args.unused_days, args.target.as_deref()) {
-        (Some(_), Some(_)) | (None, None) => {
-            bail!("select exactly one of --unused-days or --target")
-        }
-        (Some(days), None) => GcMode::UnusedDays(days),
-        (None, Some(value)) => GcMode::Target(parse_bytes(value)?),
-    };
     let opts = GcOptions {
-        mode,
+        mode: gc_mode(args.unused_days, args.target.as_deref())?,
         level: args.level,
         include_unrecoverable: args.include_unrecoverable,
     };
@@ -145,66 +151,59 @@ pub fn gc_command(args: GcArgs) -> Result<()> {
     let (targets, skipped) = plan_gc(&scope, &opts)?;
     let total: u64 = targets.iter().map(|target| target.bytes).sum();
 
-    // Decide whether to delete. JSON mode never prompts (scripts can't answer
-    // interactively); --force is the only way to execute from JSON.
-    let will_execute = if args.dry_run || targets.is_empty() {
-        false
-    } else if args.force {
-        true
-    } else if args.json {
-        false
-    } else {
-        confirm_delete(total)?
-    };
-
     if args.json {
-        if will_execute {
+        // JSON mode never prompts (scripts can't answer interactively);
+        // --force is the only way to execute from JSON.
+        let executed = args.force && !args.dry_run && !targets.is_empty();
+        if executed {
             execute_targets(&targets, true)?;
         }
-        let mode = match opts.mode {
-            GcMode::UnusedDays(days) => GcModeJson::UnusedDays { unused_days: days },
-            GcMode::Target(bytes) => GcModeJson::Target {
-                target_bytes: bytes,
-            },
-        };
         return print_json(&GcReport {
-            mode,
+            mode: GcModeJson::from(&opts.mode),
             targets: &targets,
             skipped: &skipped,
             total_bytes: total,
-            executed: will_execute,
+            executed,
         });
     }
 
-    let rows: Vec<Vec<String>> = targets
-        .iter()
-        .map(|target| {
-            vec![
-                target.project.clone(),
-                target.path.display().to_string(),
-                format_bytes(target.bytes),
-            ]
-        })
-        .collect();
-    print_table(&["PROJECT", "WOULD REMOVE", "SIZE"], &rows);
+    // The whole plan is printed before the prompt so the answer is informed.
+    print_gc_plan(&targets, &skipped, total);
+    if args.dry_run || targets.is_empty() {
+        return Ok(());
+    }
+    if !args.force && !confirm_delete(total)? {
+        println!("Aborted.");
+        return Ok(());
+    }
+    execute_targets(&targets, false)
+}
 
+fn gc_mode(unused_days: Option<u64>, target: Option<&str>) -> Result<GcMode> {
+    match (unused_days, target) {
+        (Some(_), Some(_)) | (None, None) => {
+            bail!("select exactly one of --unused-days or --target")
+        }
+        (Some(days), None) => Ok(GcMode::UnusedDays(days)),
+        (None, Some(value)) => Ok(GcMode::Target(parse_bytes(value)?)),
+    }
+}
+
+fn print_gc_plan(targets: &[CleanTarget], skipped: &[GcSkip], total: u64) {
+    if targets.is_empty() {
+        println!("Nothing to reclaim.");
+    } else {
+        print_clean_plan(targets);
+    }
     if !skipped.is_empty() {
         println!("\nSkipped (unrecoverable, use --include-unrecoverable to force):");
-        for skip in &skipped {
+        for skip in skipped {
             println!("  {}  {}", skip.project, skip.reason);
         }
     }
-
-    println!("Total reclaimable: {}", format_bytes(total));
-
-    if !will_execute {
-        if !args.dry_run && !targets.is_empty() {
-            println!("Aborted.");
-        }
-        return Ok(());
+    if !targets.is_empty() {
+        println!("Total reclaimable: {}", format_bytes(total));
     }
-    execute_targets(&targets, false)?;
-    Ok(())
 }
 
 #[cfg(test)]

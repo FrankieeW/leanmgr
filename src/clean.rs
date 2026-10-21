@@ -3,11 +3,11 @@
 use crate::cli::{CleanArgs, CleanLevel};
 use crate::output::{format_bytes, print_table};
 use crate::project::{Project, select_projects};
+use crate::prompt::confirm;
 use crate::size::dir_size;
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use std::fs;
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 /// One planned removal target.
@@ -25,15 +25,16 @@ pub struct CleanTarget {
 pub fn clean_command(args: CleanArgs) -> Result<()> {
     let projects = select_projects(args.project.as_deref(), args.tag.as_deref(), args.all)?;
     let targets = build_clean_plan(&projects, args.level)?;
+    if targets.is_empty() {
+        println!("Nothing to clean.");
+        return Ok(());
+    }
     let total: u64 = targets.iter().map(|target| target.bytes).sum();
 
     print_clean_plan(&targets);
     println!("Total reclaimable: {}", format_bytes(total));
 
     if args.dry_run {
-        return Ok(());
-    }
-    if targets.is_empty() {
         return Ok(());
     }
     if !args.force && !confirm_delete(total)? {
@@ -105,7 +106,8 @@ fn push_existing(
     Ok(())
 }
 
-fn print_clean_plan(targets: &[CleanTarget]) {
+/// Print the removal plan as a `PROJECT / WOULD REMOVE / SIZE` table.
+pub(crate) fn print_clean_plan(targets: &[CleanTarget]) {
     let rows: Vec<Vec<String>> = targets
         .iter()
         .map(|target| {
@@ -120,11 +122,7 @@ fn print_clean_plan(targets: &[CleanTarget]) {
 }
 
 pub(crate) fn confirm_delete(total: u64) -> Result<bool> {
-    print!("Delete {}? [y/N] ", format_bytes(total));
-    io::stdout().flush()?;
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    Ok(matches!(input.trim(), "y" | "Y" | "yes" | "YES"))
+    confirm(&format!("Delete {}?", format_bytes(total)))
 }
 
 fn remove_target(target: &CleanTarget, quiet: bool) -> Result<()> {

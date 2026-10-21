@@ -1,7 +1,7 @@
 //! Offline recoverability assessment for project `.lake` caches.
 
+use crate::lake::{has_lakefile, read_toolchain};
 use crate::project::Project;
-use std::fs;
 
 /// Whether a project's `.lake` can be rebuilt after deletion.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,12 +22,12 @@ pub fn assess(project: &Project) -> Recoverability {
     if !root.join("lake-manifest.json").exists() {
         return Recoverability::Unrecoverable("no lake-manifest.json".to_string());
     }
-    if !root.join("lakefile.toml").exists() && !root.join("lakefile.lean").exists() {
+    if !has_lakefile(&root) {
         return Recoverability::Unrecoverable("no lakefile.toml or lakefile.lean".to_string());
     }
-    match fs::read_to_string(root.join("lean-toolchain")) {
-        Ok(content) if !content.trim().is_empty() => Recoverability::Recoverable,
-        _ => Recoverability::Unrecoverable("no lean-toolchain".to_string()),
+    match read_toolchain(&root) {
+        Some(_) => Recoverability::Recoverable,
+        None => Recoverability::Unrecoverable("no lean-toolchain".to_string()),
     }
 }
 
@@ -35,6 +35,7 @@ pub fn assess(project: &Project) -> Recoverability {
 mod tests {
     use super::*;
     use crate::project::Project;
+    use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 

@@ -1,6 +1,8 @@
 //! Restore orchestration around `lake exe cache get`.
 
 use crate::cli::RestoreArgs;
+use crate::lake::requires_mathlib;
+use crate::output::print_table;
 use crate::process::run_in;
 use crate::project::{Project, select_projects};
 use anyhow::{Result, bail};
@@ -8,34 +10,110 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
 use std::process::Output;
 
+/// The command restore runs for projects that can download artifacts.
+const CACHE_GET: &str = "lake exe cache get";
+
+/// What restore does for one project.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RestoreStep {
+    /// Run `lake exe cache get` in the project directory.
+    CacheGet,
+    /// Leave the project alone, for the given reason.
+    Skip(&'static str),
+}
+
+/// Decide how to restore one project.
+///
+/// `lake exe cache get` is Mathlib's artifact downloader, so it only exists
+/// for Mathlib and projects that depend on it. Other projects are skipped
+/// with a pointer to `lake build` instead of failing with "unknown
+/// executable cache".
+fn plan_restore(project: &Project) -> RestoreStep {
+    let root = project.expanded_path();
+    if !root.is_dir() {
+        return RestoreStep::Skip("path missing");
+    }
+    if !requires_mathlib(&root) {
+        return RestoreStep::Skip("no Mathlib dependency; `lake build` rebuilds it");
+    }
+    RestoreStep::CacheGet
+}
+
 /// Run the restore command.
 pub fn restore_command(args: RestoreArgs) -> Result<()> {
     let projects = select_projects(args.project.as_deref(), args.tag.as_deref(), args.all)?;
+    let plan: Vec<(Project, RestoreStep)> = projects
+        .into_iter()
+        .map(|project| {
+            let step = plan_restore(&project);
+            (project, step)
+        })
+        .collect();
+
+    if args.dry_run {
+        print_restore_plan(&plan);
+        return Ok(());
+    }
+
+    for (project, step) in &plan {
+        if let RestoreStep::Skip(reason) = step {
+            println!("Skipped {}: {reason}", project.name);
+        }
+    }
+    let runnable: Vec<&Project> = plan
+        .iter()
+        .filter(|(_, step)| *step == RestoreStep::CacheGet)
+        .map(|(project, _)| project)
+        .collect();
+    if runnable.is_empty() {
+        println!("Nothing to restore.");
+        return Ok(());
+    }
+
+    let failures = run_with_progress(&runnable);
+    let restored = runnable.len() - failures.len();
+    println!("Restored {restored} project(s).");
+    if failures.is_empty() {
+        return Ok(());
+    }
+    for (project, error) in &failures {
+        println!("Restore failed for {project}: {error}");
+    }
+    bail!("restore failed for {} project(s)", failures.len())
+}
+
+fn print_restore_plan(plan: &[(Project, RestoreStep)]) {
+    let rows: Vec<Vec<String>> = plan
+        .iter()
+        .map(|(project, step)| {
+            let action = match step {
+                RestoreStep::CacheGet => CACHE_GET.to_string(),
+                RestoreStep::Skip(reason) => format!("skip: {reason}"),
+            };
+            vec![project.name.clone(), action]
+        })
+        .collect();
+    print_table(&["PROJECT", "ACTION"], &rows);
+}
+
+/// Run `lake exe cache get` for each project behind a progress bar and
+/// return the failures.
+fn run_with_progress(projects: &[&Project]) -> Vec<(String, String)> {
     let bar = ProgressBar::new(projects.len() as u64);
     bar.set_style(
         ProgressStyle::with_template("{wide_bar} {pos}/{len} {msg}")
             .unwrap_or_else(|_| ProgressStyle::default_bar()),
     );
-
     let mut failures = Vec::new();
     for project in projects {
         bar.set_message(project.name.clone());
-        if let Err(failure) = run_restore_for(&project, lake_runner) {
+        if let Err(failure) = run_restore_for(project, lake_runner) {
             failures.push(failure);
         }
         bar.inc(1);
     }
     bar.finish_and_clear();
-
-    if failures.is_empty() {
-        println!("Restore completed.");
-        return Ok(());
-    }
-
-    for (project, error) in &failures {
-        println!("Restore failed for {project}: {error}");
-    }
-    bail!("restore failed for {} project(s)", failures.len())
+    failures
 }
 
 /// Execute `lake exe cache get` in the project's directory via the
@@ -71,7 +149,56 @@ fn lake_runner(dir: &Path, args: &[&str]) -> Result<Output> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
     use std::process::{ExitStatus, Output};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn tmp(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("leanmgr-restore-{name}-{nonce}"));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn project_at(root: &Path) -> Project {
+        Project {
+            path: root.display().to_string(),
+            ..project("demo")
+        }
+    }
+
+    #[test]
+    fn plan_runs_cache_get_for_mathlib_dependents() {
+        let root = tmp("plan_mathlib");
+        fs::write(
+            root.join("lake-manifest.json"),
+            br#"{"version": "1.1.0", "packages": [{"type": "git", "name": "mathlib"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(plan_restore(&project_at(&root)), RestoreStep::CacheGet);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn plan_skips_projects_without_mathlib() {
+        let root = tmp("plan_plain");
+        fs::write(root.join("lakefile.toml"), b"name = \"demo\"\n").unwrap();
+        assert!(matches!(
+            plan_restore(&project_at(&root)),
+            RestoreStep::Skip(reason) if reason.contains("no Mathlib")
+        ));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn plan_skips_missing_paths() {
+        let project = project_at(Path::new("/nonexistent/leanmgr-restore-gone"));
+        assert_eq!(plan_restore(&project), RestoreStep::Skip("path missing"));
+    }
 
     fn project(name: &str) -> Project {
         Project {
