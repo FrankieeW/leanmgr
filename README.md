@@ -63,6 +63,18 @@ Script behavior is controlled by environment variables:
 | `LEANMGR_VERSION` | Git tag for the cargo fallback (default `v0.2.0`). |
 | `INSTALL_DIR` | Target dir for the local-build path (default `~/.local/bin`). |
 
+### Shell Completions
+
+`leanmgr completions <shell>` prints a completion script for `bash`, `zsh`,
+`fish`, `powershell`, or `elvish`. Homebrew installs them automatically; for
+other installs, write the script where your shell looks for completions:
+
+```sh
+leanmgr completions zsh > "${fpath[1]}/_leanmgr"
+leanmgr completions bash > ~/.local/share/bash-completion/completions/leanmgr
+leanmgr completions fish > ~/.config/fish/completions/leanmgr.fish
+```
+
 ## Configuration
 
 LeanMgr stores configuration at:
@@ -120,9 +132,26 @@ leanmgr clean --tag archived --level hard
 Restore cache with Lake:
 
 ```sh
+leanmgr restore --tag active --dry-run
 leanmgr restore QuadraticNumberFields
 leanmgr restore --tag active
 ```
+
+`restore` runs `lake exe cache get`, Mathlib's artifact downloader, so it only
+applies to Mathlib and projects that depend on it (per `lake-manifest.json`,
+or the Lake file when there is no manifest yet). Other projects, and projects
+whose path is missing, are skipped with the reason instead of failing;
+`lake build` rebuilds those. `--dry-run` prints the plan without running Lake.
+
+Drop index entries for projects that were moved or deleted:
+
+```sh
+leanmgr remove --missing --dry-run
+leanmgr remove --missing
+```
+
+Only `config.json` changes. A project on an unmounted drive also looks
+missing, so the list is confirmed first unless `--force` is given.
 
 ## Tutorial
 
@@ -157,7 +186,8 @@ leanmgr gc --unused-days 90                  # confirm, then delete
 
 Unrecoverable caches are skipped and listed. Use `--include-unrecoverable` to
 delete them anyway. `gc` defaults to `--level hard` and, like `clean`, supports
-`--dry-run`, `--force`, and `--json`.
+`--dry-run`, `--force`, and `--json`. Without `--force`, the full plan is
+printed before the confirmation prompt.
 
 ## Interactive Assistant
 
@@ -181,8 +211,12 @@ show doctor details, plan a stale-cache gc dry-run, plan one-project cleanup,
 or build restore commands.
 
 Controls: use `1`-`5` to run an action, arrow keys or `j`/`k` to move, Enter
-to open, `r` to refresh diagnostics, and `q` to quit. It does not use a
+to open, `r` to refresh diagnostics, and `q`, Esc, or Ctrl-C to quit. The
+diagnostics are computed once per session (they walk every `.lake`), so
+navigation is instant; press `r` to recompute them. It does not use a
 fullscreen alternate screen; output stays in the normal terminal scrollback.
+When stdin is not a terminal, the assistant reads numbered answers line by line
+and exits at end of input.
 
 The interactive assistant is intentionally review-first. It does not delete
 cache directories itself; destructive cleanup remains in `leanmgr clean` and
@@ -191,8 +225,9 @@ cache directories itself; destructive cleanup remains in `leanmgr clean` and
 ## Size Cache
 
 `leanmgr list` is intentionally fast. It reads cached size values from
-`config.json` and shows `unknown` / `never` when a project has not been measured
-yet.
+`config.json`, shows how long ago each was measured (`MEASURED`, e.g.
+`3d ago`), and shows `unknown` / `never` when a project has not been measured
+yet. The `STATUS` column flags projects whose path no longer exists.
 
 Refresh cached sizes explicitly:
 
@@ -211,7 +246,8 @@ lm
 leanmgr
 leanmgr init
 leanmgr add <path> [--name <name>] [--tag <tag>]...
-leanmgr remove <name-or-path>
+leanmgr remove <name-or-path> [--dry-run]
+leanmgr remove --missing [--dry-run] [--force]
 leanmgr list [--tag <tag>] [--sizes] [--json]
 leanmgr scan <root> [--yes] [--json]
 leanmgr size [<name>] [--tag <tag>] [--all] [--json]
@@ -223,7 +259,7 @@ leanmgr clean --tag <tag> --level <soft|deps-build|hard> [--dry-run] [--force]
 leanmgr clean --all --level <soft|deps-build|hard> [--dry-run] [--force]
 leanmgr gc --unused-days <N> [--tag <tag>] [--level <soft|deps-build|hard>] [--include-unrecoverable] [--dry-run] [--force] [--json]
 leanmgr gc --target <SIZE> [--tag <tag>] [--level <soft|deps-build|hard>] [--include-unrecoverable] [--dry-run] [--force] [--json]
-leanmgr restore <name> [--all] [--tag <tag>]
+leanmgr restore <name> [--all] [--tag <tag>] [--dry-run]
 leanmgr tag add <project> <tag>
 leanmgr tag remove <project> <tag>
 leanmgr tag list
@@ -235,8 +271,13 @@ leanmgr toolchain list
 leanmgr toolchain check
 leanmgr worktree list
 leanmgr worktree doctor
-leanmgr worktree prune --dry-run
+leanmgr worktree prune [--dry-run] [--force]
+leanmgr completions <bash|zsh|fish|powershell|elvish>
 ```
+
+`toolchain` and `worktree` commands skip projects whose path no longer exists
+(and, for `worktree`, directories outside Git) and say so, rather than
+failing. Projects that share one Git repository are audited once.
 
 ## Development
 
@@ -258,8 +299,12 @@ Deletion targets are canonicalized and checked against the selected project's
 `.lake` directory before execution. Symlinked targets are refused rather than
 followed. LeanMgr does not delete project source directories.
 
-Project selectors (`clean`, `restore`, `gitignore <project>`) fail loudly when
-they match no indexed project instead of silently doing nothing.
+Project selectors (`clean`, `restore`, `size`, `remove`, `gitignore <project>`)
+fail loudly when they match no indexed project instead of silently doing
+nothing.
+
+`config.json` is written atomically (temporary file, then rename), so an
+interrupted command cannot leave a truncated project index behind.
 
 ## Native AI Support
 

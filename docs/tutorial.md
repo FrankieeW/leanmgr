@@ -78,13 +78,28 @@ for narrower scopes.
 ## 6. Restore when you come back to a project
 
 ```sh
+leanmgr restore MyProject --dry-run   # show what would run
 leanmgr restore MyProject
-leanmgr restore --tag archived --all
+leanmgr restore --tag archived
 ```
 
 `leanmgr restore` shells out to `lake exe cache get`, which re-fetches
-the Lake dependencies recorded in `lake-manifest.json`. This is what
-makes gc safe: nothing is destroyed that `lake` cannot rebuild.
+the Lake dependencies recorded in `lake-manifest.json` and downloads
+Mathlib's prebuilt artifacts. This is what makes gc safe: nothing is
+destroyed that `lake` cannot rebuild. Projects that do not depend on
+Mathlib have no artifacts to download, so restore skips them and says so —
+run `lake build` in those.
+
+## 6b. Tidy the index after moving projects
+
+```sh
+leanmgr list                        # STATUS shows "missing" for moved/deleted paths
+leanmgr remove --missing --dry-run  # preview
+leanmgr remove --missing            # confirm, then drop them from the index
+```
+
+Only the index changes; no files are deleted. A project on an unmounted
+drive also looks missing, so read the list before confirming.
 
 ## 7. JSON scripts (CI / automation)
 
@@ -112,4 +127,5 @@ executed=$(echo "$result" | jq .executed)
 
 - `leanmgr --help` — command list
 - `leanmgr <command> --help` — flag details
+- `leanmgr completions zsh` — shell completions (Homebrew installs them for you)
 - `leanmgr ai context --format codex` — agent-friendly project snapshot
