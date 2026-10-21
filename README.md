@@ -101,7 +101,14 @@ Add projects:
 ```sh
 leanmgr add ~/LeanProjects/QuadraticNumberFields --tag msc --tag active
 leanmgr scan ~/LeanProjects --yes
+leanmgr scan --from-elan            # every project elan has seen, wherever it lives
+leanmgr scan --from-elan --yes
 ```
+
+`scan --from-elan` asks elan (`elan toolchain gc --json`, report only) which
+directories it has run Lean in, keeps the ones that are Lake projects, and
+leaves out dependency checkouts under `.lake/packages`. Projects already in the
+index are marked `(already indexed)`.
 
 Inspect:
 
@@ -182,15 +189,37 @@ age or by a size budget, and gc deletes only caches it judges *recoverable*
 `lakefile.lean` — and a non-empty `lean-toolchain`):
 
 ```sh
-leanmgr gc --unused-days 90 --dry-run        # clean everything stale
-leanmgr gc --target 20GiB --dry-run          # free at least 20 GiB, largest first
-leanmgr gc --unused-days 90                  # confirm, then delete
+leanmgr gc --unused-days 90 --dry-run                  # clean everything stale
+leanmgr gc --target 20GiB --dry-run                    # free at least 20 GiB, largest first
+leanmgr gc --target 20GiB --unused-days 14 --dry-run   # same, but never touch caches used in the last 14 days
+leanmgr gc --unused-days 90                            # confirm, then delete
 ```
 
+On its own, `--target` picks the largest caches first, whether or not you are
+working in them; add `--unused-days` to keep recently used caches out of reach.
 Unrecoverable caches are skipped and listed. Use `--include-unrecoverable` to
 delete them anyway. `gc` defaults to `--level hard` and, like `clean`, supports
 `--dry-run`, `--force`, and `--json`. Without `--force`, the full plan is
 printed before the confirmation prompt.
+
+## Shared Caches
+
+Some Lean disk usage lives outside every project. `leanmgr doctor` reports it
+under "Shared caches" (and in `doctor --json` under `shared_caches`):
+
+- **Mathlib downloads** — the `.ltar` files `lake exe cache get` downloads,
+  shared by every checkout (`MATHLIB_CACHE_DIR`, else `$XDG_CACHE_HOME/mathlib`,
+  else `~/.cache/mathlib`). `lake exe cache clean!`, run in any Mathlib
+  project, empties it; each project re-downloads what it needs on its next
+  `lake exe cache get`.
+- **elan toolchains** — every installed Lean toolchain (`$ELAN_HOME/toolchains`,
+  else `~/.elan/toolchains`).
+- **Unused toolchains** — the ones elan's own `elan toolchain gc` says no known
+  project, override, or default uses, with their sizes. `leanmgr toolchain
+  check` lists them too. Remove them with `elan toolchain gc --delete`.
+
+LeanMgr only measures these and asks elan for a report; it never deletes a
+shared cache or a toolchain itself.
 
 ## Interactive Assistant
 
@@ -253,6 +282,7 @@ leanmgr remove <name-or-path> [--dry-run]
 leanmgr remove --missing [--dry-run] [--force]
 leanmgr list [--tag <tag>] [--sizes] [--json]
 leanmgr scan <root> [--yes] [--json]
+leanmgr scan --from-elan [--yes] [--json]
 leanmgr size [<name>] [--tag <tag>] [--all] [--json]
 leanmgr doctor [--unused-days 90] [--json]
 leanmgr interact [--unused-days 90] [--tag <tag>]
@@ -261,7 +291,7 @@ leanmgr clean <name> --level <soft|deps-build|hard> [--dry-run] [--force]
 leanmgr clean --tag <tag> --level <soft|deps-build|hard> [--dry-run] [--force]
 leanmgr clean --all --level <soft|deps-build|hard> [--dry-run] [--force]
 leanmgr gc --unused-days <N> [--tag <tag>] [--level <soft|deps-build|hard>] [--include-unrecoverable] [--dry-run] [--force] [--json]
-leanmgr gc --target <SIZE> [--tag <tag>] [--level <soft|deps-build|hard>] [--include-unrecoverable] [--dry-run] [--force] [--json]
+leanmgr gc --target <SIZE> [--unused-days <N>] [--tag <tag>] [--level <soft|deps-build|hard>] [--include-unrecoverable] [--dry-run] [--force] [--json]
 leanmgr restore <name> [--all] [--tag <tag>] [--dry-run]
 leanmgr tag add <project> <tag>
 leanmgr tag remove <project> <tag>

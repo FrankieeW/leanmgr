@@ -23,6 +23,8 @@ leanmgr list
 `leanmgr add` validates that the path contains `lakefile.toml` or
 `lakefile.lean`, then writes a record into the config. Repeat for each
 project, or use `leanmgr scan <root> --yes` to discover them in bulk.
+If your projects are scattered, `leanmgr scan --from-elan` lists every
+Lake project elan has seen Lean run in; add `--yes` to index them.
 
 ## 3. Inspect disk usage
 
@@ -36,20 +38,24 @@ leanmgr doctor --json       # machine-readable for pipelines
 `leanmgr list` is fast (reads the size cache). `leanmgr size` walks the
 filesystem — slower but always fresh. `doctor` surfaces projects whose
 path is missing, whose Lake file is gone, or whose `.lake` mtime is older
-than `--unused-days`.
+than `--unused-days`. It also measures the caches every project shares —
+Mathlib's download cache and elan's toolchains — and lists toolchains
+`elan toolchain gc` considers unused.
 
 ## 4. Plan cleanup (always dry-run first)
 
 ```sh
 leanmgr gc --unused-days 90 --dry-run
-leanmgr gc --target 20GiB  --dry-run
-leanmgr gc --tag archived  --dry-run
+leanmgr gc --target 20GiB --dry-run
+leanmgr gc --target 20GiB --unused-days 14 --dry-run
+leanmgr gc --unused-days 30 --tag archived --dry-run
 ```
 
 `--unused-days N` selects projects whose `.lake` mtime is older than
 `N` days. `--target SIZE` greedily picks the largest recoverable caches
-until the budget is met. `--tag` narrows the scope. Add `--json` for
-machine-readable output:
+until the budget is met; combine it with `--unused-days` so the budget
+never reaches a project you are working on. `--tag` narrows the scope.
+Add `--json` for machine-readable output:
 
 ```sh
 leanmgr gc --unused-days 90 --dry-run --json
